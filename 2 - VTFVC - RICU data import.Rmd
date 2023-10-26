@@ -1,0 +1,232 @@
+---
+title: "Age-, sex-, and race-associated variation in tidal volume to forced vital capacity ratio predicts mortality in the acute respiratory distress syndrome"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+## Patient populations
+```{r loaddata}
+#This block is slow. Only rerun if imported tables need to be updated.
+# 
+library(tidyverse)
+library(ricu)
+library(data.table)
+library(dtplyr)
+
+#### MIMIC-IV ####
+vent.settings <- concept(
+  c("tidalvolume", "peep", "plateau"),
+  list(
+    item("miiv", "chartevents", "itemid", c(224684)), # Set tidal volume
+    item("miiv", "chartevents", "itemid", c(220339)), # PEEP
+    item("miiv", "chartevents", "itemid", c(224696)) # Plateau
+  ),
+  description = c("tidalvolume", "peep", "plateau")
+)
+
+miiv.subjects <- miiv$icustays %>%
+  as.data.table() %>%
+  dplyr::select(subject_id, hadm_id, stay_id) %>%
+  as.data.table %>%
+  left_join(miiv$admissions %>%
+                as.data.table() %>%
+              dplyr::select(hadm_id, race, hospital_expire_flag))
+
+
+miiv.vent <- load_concepts(vent.settings, src = "miiv")
+miiv.sfratios <- load_concepts(c("safi", "o2sat", "fio2"), src = "miiv")
+miiv.sfratios <- miiv.sfratios %>% filter(o2sat <= 97)
+
+miiv.demo<- load_concepts(c("sex","age","height", "bmi"), src = "miiv")
+
+miiv.sofa <- load_concepts("sofa", "miiv")
+
+saveRDS(miiv.subjects, "miiv.subjects.Rds")
+saveRDS(miiv.vent, "miiv.vent.Rds")
+saveRDS(miiv.sfratios, "miiv.sfratios.Rds")
+saveRDS(miiv.demo, "miiv.demo.Rds")
+saveRDS(miiv.sofa, "miiv.sofa.Rds")
+```
+
+
+
+
+```{r}
+#
+# ### EICU
+# ###
+
+vent.settings <- concept(
+  c("tv1", "tv2", "tv3", "tv4", "ventmode1", "ventmode2", "peep1", "peep2", "plateau"),
+  list(
+    item("eicu", "respiratorycharting", "respchartvaluelabel", "Tidal Volume (set)"), # Set tidal volume
+        item("eicu", "respiratorycharting", "respchartvaluelabel", "Adult Con Setting Set Vt"), # Set tidal volume
+            item("eicu", "respiratorycharting", "respchartvaluelabel", "Set Vt (Servo,LTV)"), # Set tidal volume
+                item("eicu", "respiratorycharting", "respchartvaluelabel", "Set Vt (Drager)"), # Set tidal volume
+    item("eicu", "respiratorycharting", "respchartvaluelabel", "PEEP"), # PEEP
+        item("eicu", "respiratorycharting", "respchartvaluelabel", "PEEP/CPAP"), # PEEP
+    item("eicu", "respiratorycharting", "respchartvaluelabel", "Plateau Pressure") # Plateau
+  ),
+  description = c("tvset1", "tvset2", "tvset3", "tvset4", "ventmode1", "ventmode2", "peep1", "peep2", "plateau"))
+
+####
+eicu.patients <- eicu$patient %>%
+  as.data.table() %>%
+  dplyr::select(uniquepid,patientunitstayid, patienthealthsystemstayid,ethnicity, hospitaldischargestatus, hospitalid )
+
+# eicu$respiratorycharting$respchartvaluelabel %>% unique %>% sort
+
+eicu.vent <- load_concepts(vent.settings, src = "eicu")
+
+eicu.vent <- eicu.vent %>%
+  mutate(peep = case_when(
+    !is.na(peep1) ~ peep1,
+    !is.na(peep2) ~ peep2
+  ),
+  dp = plateau - peep) %>%
+  mutate(tidalvolume =
+           case_when(
+             !is.na(tv1) ~ tv1,
+             !is.na(tv2) ~ tv2,
+             !is.na(tv3) ~ tv3,
+             !is.na(tv4) ~ tv4
+           )) %>%
+  arrange(patientunitstayid, respchartoffset) %>%
+  dplyr::select(patientunitstayid, respchartoffset, tidalvolume, peep, plateau, dp)
+eicu.sfratios <- load_concepts(c("safi", "o2sat", "fio2"), src = "eicu")
+eicu.sfratios <- eicu.sfratios %>% filter(o2sat <= 97)
+eicu.demo<- load_concepts(c("sex","age","height", "bmi"), src = "eicu")
+eicu.sofa <- load_concepts("sofa", "eicu")
+
+saveRDS(eicu.vent, "eicu.vent.Rds")
+saveRDS(eicu.demo, "eicu.demo.Rds")
+saveRDS(eicu.sfratios, "eicu.safi.Rds")
+saveRDS(eicu.sofa, "eicu.sofa.Rds")
+#
+
+```
+
+```{r}
+miiv.subjects<- readRDS("miiv.subjects.Rds")
+miiv.vent<- readRDS("miiv.vent.Rds")
+miiv.sfratios<- readRDS("miiv.sfratios.Rds")
+miiv.demo<- readRDS( "miiv.demo.Rds")
+miiv.sofa<- readRDS( "miiv.sofa.Rds")
+
+miiv.df <-
+  miiv.subjects %>%
+  left_join(miiv.vent) %>%
+    left_join(miiv.sfratios) %>%
+    left_join(miiv.demo) %>%
+    left_join(miiv.sofa) %>%
+  mutate(dp = plateau - peep) %>%
+  as.data.table()
+```
+
+```{r}
+eicu.vent <- readRDS("eicu.vent.Rds")
+eicu.sofa <- readRDS("eicu.sofa.Rds")
+eicu.sfratios <- readRDS("eicu.safi.Rds")
+eicu.demo <- readRDS("eicu.demo.Rds")
+
+
+
+dim(eicu.vent)
+eicu.df <-
+  eicu.patients %>%
+  left_join(eicu.vent) %>%
+  left_join(eicu.sfratios, by = c("patientunitstayid" = "patientunitstayid", "respchartoffset" = "observationoffset")) %>% 
+  left_join(eicu.demo) %>% 
+  left_join(eicu.sofa, by = c("patientunitstayid" = "patientunitstayid", "respchartoffset" = "labresultoffset")) %>%
+  as.data.table
+```
+
+```{r}
+
+#If height is not available for a hospital stay
+#impute the height as the mean of all other hospital stays
+#for that subject 
+ 
+miiv.df <- miiv.df %>%
+  group_by(subject_id) %>%
+  mutate(height = case_when(
+    !is.na(height) ~ height, 
+    TRUE ~ mean(height, na.rm = T)
+  ), 
+  bmi = case_when(
+    !is.na(bmi) ~ bmi, 
+    TRUE ~ mean(bmi, na.rm = T)
+  ))
+
+eicu.df <- eicu.df %>%
+  group_by(uniquepid) %>%
+  mutate(height = case_when(
+    !is.na(height) ~ height, 
+    TRUE ~ mean(height, na.rm = T)
+  ), 
+  bmi = case_when(
+    !is.na(bmi) ~ bmi, 
+    TRUE ~ mean(bmi, na.rm = T)
+  ))
+
+#Assign GLI race categories for subjects in MIMIC-IV and eICU
+miiv.df <- miiv.df %>%
+  arrange(charttime) %>%
+  mutate(
+    race0 = race,
+    race = case_when(
+    str_detect(race, "WHITE") ~ "WHITE", 
+    str_detect(race, "BLACK/AFRICAN AMERICAN") ~ "BLACK",
+    TRUE ~ "OTHER"
+  )) %>%
+  as.data.table
+
+eicu.df <- eicu.df %>%
+  mutate(dp = plateau - peep) %>%
+  mutate(
+    race = case_when(
+    str_detect(ethnicity, "Caucasian") ~ "WHITE", 
+    str_detect(ethnicity, "African American") ~ "BLACK",
+    TRUE ~ "OTHER"
+  )) %>%
+  as.data.table
+
+#Calculate the tidal volume in cc per kg using the ARDSNet PBW formulas
+miiv.df <- miiv.df%>%
+    mutate(gender12 = case_when(sex == "Male"~ 1, sex == "Female" ~ 2)) %>%
+    mutate(ccperkg = 
+           case_when(
+             sex == "Male" ~ tidalvolume/((50 + 2.3 * ((height/100 * 39.37) - 60))), 
+             sex == "Female" ~ tidalvolume/((45.5 + 2.3 * ((height/100 * 39.37) - 60)))
+           )) 
+
+eicu.df <- eicu.df%>%
+  mutate(gender12 = case_when(sex == "Male"~ 1, sex == "Female" ~ 2)) %>%
+    mutate(ccperkg = 
+           case_when(
+             sex == "Male" ~ tidalvolume/((50 + 2.3 * ((height/100 * 39.37) - 60))), 
+             sex == "Female" ~ tidalvolume/((45.5 + 2.3 * ((height/100 * 39.37) - 60)))
+           )) 
+
+#Create a mortality variable for both datasets
+miiv.df <- miiv.df %>%
+    mutate(mortality = 
+           case_when(
+             hospital_expire_flag == 1~ 1, 
+             hospital_expire_flag == 0~ 0
+           ))
+
+eicu.df <- eicu.df %>%
+  mutate(mortality = 
+           case_when(
+             hospitaldischargestatus == "Expired" ~ 1, 
+             hospitaldischargestatus == "Alive"  ~0
+           ))
+
+#Save the processed dataframes as RDS objects in the working directory
+saveRDS(miiv.df, "miiv.df.Rds")
+saveRDS(eicu.df, "eicu.df.Rds")
+```
+
+

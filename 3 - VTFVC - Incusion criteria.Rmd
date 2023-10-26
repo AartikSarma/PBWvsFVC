@@ -1,0 +1,156 @@
+---
+title: "VTFVC - Inclusion criteria"
+output:
+  word_document: default
+  html_document: default
+date: "2023-07-03"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+library(visR)
+
+#Load the processed data frames from "ricu data import.Rmd"
+miiv.df <- readRDS("miiv.df.Rds")
+eicu.df <- readRDS("eicu.df.Rds")
+```
+
+```{r}
+#Define the logical tests to use for inclusion criteria
+inclusion_criteria <- c(
+  "!is.na(tidalvolume)", 
+  "ccperkg >=6 & ccperkg <=8 & tidalvolume > 200 & tidalvolume < 1000", 
+  "height >= 150 & height<=210",
+  "!is.na(safi) & o2sat <= 97 & o2sat >= 80",
+  "safi < 315", 
+  "!is.na(sofa) & !is.na(mortality)"
+                          ) 
+
+#Criteria for subjects to include in driving pressure analyses
+valid.dp.criteria <- c("!is.na(plateau) & !is.na(peep) & peep >=5 & plateau >= (peep + 5) & peep < 20 & plateau < 50")
+
+
+miiv.df <- miiv.df %>% 
+  mutate(valid.dp = !!!rlang::parse_exprs(valid.dp.criteria)) %>% 
+  dplyr::rename(valid.dp = `&...`)
+
+eicu.df <- eicu.df %>% 
+  mutate(valid.dp = !!!rlang::parse_exprs(valid.dp.criteria)) %>% 
+  dplyr::rename(valid.dp = `&...`)
+
+merged_inclusion_criteria <- c(inclusion_criteria, "valid.dp")
+
+inclusion_descriptions <- c("Mechanically ventilated", 
+                            "Lung-protective ventilation",
+                            "Between 150-210cm",
+                            "SF ratio measured",
+                            "Hypoxemic",
+                            "Included in VFR analysis", 
+                            "Included in DP analysis"
+)
+
+exclusion_descriptions <- c(NA, "No tidal volume recorded", "VT <6cc/kg or VT >8cc/kg", "Height outside range", "SF ratio missing", "SF ratio > 315", "SOFA score or mortality missing", "Driving pressure not measured")
+```
+
+```{r}
+miiv.attrition <-get_attrition(
+  miiv.df,
+  criteria_descriptions = inclusion_descriptions,
+  criteria_conditions = merged_inclusion_criteria,
+  subject_column_name = "subject_id"
+)
+
+miiv.attrition$Complement <- exclusion_descriptions
+  
+```
+
+```{r}
+eicu.attrition <-get_attrition(
+  eicu.df,
+  criteria_descriptions = inclusion_descriptions,
+  criteria_conditions = merged_inclusion_criteria,
+  subject_column_name = "uniquepid"
+)
+
+eicu.attrition$Complement <-  exclusion_descriptions
+```
+
+```{r}
+pdf("figures/CONSORT diagrams.pdf", height = 8, width = 6)
+visr(miiv.attrition,"Criteria", "Remaining N", "Complement")
+visr(eicu.attrition,"Criteria", "Remaining N", "Complement")
+dev.off()
+```
+
+
+```{r}
+#Apply the inclusion criteria
+miiv.included <- miiv.df %>%
+  filter(!!!rlang::parse_exprs(inclusion_criteria)) %>% 
+  mutate(peep = case_when(valid.dp ~ peep),
+         plateau = case_when(valid.dp ~ plateau), 
+         dp = case_when(valid.dp ~ dp), 
+         crs = ccperkg/dp) %>%
+  arrange(-mortality, stay_id, -valid.dp, charttime) %>%
+  distinct(subject_id, .keep_all = T) %>%
+  as.data.frame 
+
+eicu.included <- eicu.df  %>%
+  filter(!!!rlang::parse_exprs(inclusion_criteria)) %>% 
+    mutate(peep = case_when(valid.dp ~ peep),
+         plateau = case_when(valid.dp ~ plateau), 
+         dp = case_when(valid.dp ~ dp), 
+         crs = ccperkg/dp) %>%
+  arrange(-mortality, patientunitstayid, -valid.dp, respchartoffset) %>%
+  distinct(uniquepid, .keep_all = T) %>%
+  as.data.frame 
+
+### Add FEV1, FVC, VFR using the GLI reference equations from rspiro for the included timepoints
+library(rspiro)
+miiv.included <- 
+  miiv.included  %>%  mutate(
+        FEV1 = case_when((race == "WHITE")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 1, param = "FEV1"),
+                          (race == "BLACK")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 2, param = "FEV1"),
+                          (race == "OTHER")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 5, param = "FEV1")),
+            FVC = case_when((race == "WHITE")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 1, param = "FVC"),
+                            (race == "BLACK")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 2, param = "FVC"),
+                            (race == "OTHER")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 5, param = "FVC")),
+        VFR = tidalvolume/(FVC * 10), 
+        FEVFVC = FEV1/FVC
+  )
+
+eicu.included <- 
+  eicu.included  %>%  mutate(
+        FEV1 = case_when((race == "WHITE")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 1, param = "FEV1"),
+                          (race == "BLACK")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 2, param = "FEV1"),
+                          (race == "OTHER")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 5, param = "FEV1")),
+            FVC = case_when((race == "WHITE")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 1, param = "FVC"),
+                            (race == "BLACK")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 2, param = "FVC"),
+                            (race == "OTHER")~ pred_GLI(age, height/100, gender = gender12, ethnicity = 5, param = "FVC")),
+        VFR = tidalvolume/(FVC * 10), 
+        FEVFVC = FEV1/FVC
+  )
+
+
+
+#Save the objects to the working director
+saveRDS(miiv.included, "miiv.included.Rds")
+saveRDS(eicu.included, "eicu.included.Rds")
+
+
+
+```
+
+
+# Supplementary table showing race/ethnicity categories in GLI, MIMIC, and eICU
+```{r}
+knitr::kable(miiv.included %>%
+  count(MIMIC = race0, GLI = race) %>% arrange(GLI, MIMIC))
+
+knitr::kable(eicu.included %>%
+  count(eICU = ethnicity, GLI = race) %>% arrange(GLI, eICU))
+```
+

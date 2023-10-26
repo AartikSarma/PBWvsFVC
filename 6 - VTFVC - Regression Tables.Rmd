@@ -1,0 +1,94 @@
+---
+title: "VTFVC - Regression tables"
+output: word_document
+date: "2023-07-18"
+---
+
+```{r setup, include=FALSE}
+#Knit this Markdown file after running regression analyses to generate output tables
+
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(kableExtra)
+library(lme4)
+library(broom)
+library(broom.mixed)
+```
+
+# Regression coefficient tables
+## Primary analysis
+### MIMIC-IV
+```{r}
+load("results/VTFVC - Primary analysis/VTFVC - Primary analysis regression objects.Rda")
+lm.miiv.mortality %>%
+  tidy(exponentiate = T) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+### eICU
+```{r}
+lm.eicu.mortality %>%
+  tidy(exponentiate = T) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+
+## Adjusted for DP
+### MIMIC-IV
+```{r}
+load("results/VTFVC - Adjust for DP/VTFVC - Adjust for DP regression objects.Rda")
+lm.miiv.mortality %>%
+  tidy(exponentiate = T) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+### eICU
+```{r}
+lm.eicu.mortality %>%
+  tidy(exponentiate = T) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+## Adjusted for CRS
+### MIMIC-IV
+```{r}
+load("results/VTFVC - Adjust for Crs/VTFVC - Adjust for Crs regression objects.Rda")
+lm.miiv.mortality %>%
+  tidy(exponentiate = T) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+### eICU
+```{r}
+lm.eicu.mortality %>%
+  tidy(exponentiate = T) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+
+# Mediation analysis tables
+## Effect sizes
+```{r}
+load("results/VTFVC - Primary analysis/VTFVC - Primary analysis mediation objects.Rda")
+mediation.results %>% 
+  as.data.frame %>% 
+  filter(effect != "Proportion mediated") %>%
+  arrange(comparison, effect) %>%
+  mutate(estimate = estimate %>% as.numeric() %>% exp %>% round(2), 
+         ci.lo = ci.lo %>% as.numeric() %>% exp%>% round(2), 
+         ci.hi = ci.hi %>% as.numeric() %>% exp%>% round(2)) %>%
+  kable(digits = 2,format = "pipe")
+```
+
+## Proportion mediated
+```{r}
+mediation.results %>% 
+  as.data.frame %>% 
+  filter(effect == "Proportion mediated")%>%
+  mutate(estimate = estimate %>% as.numeric() %>% round(2), 
+         ci.lo = ci.lo %>% as.numeric()%>% round(2), 
+         ci.hi = ci.hi %>% as.numeric() %>% round(2)) %>%
+  arrange(comparison, effect) %>%
+  kable(digits = 2,format = "pipe")
+```
+

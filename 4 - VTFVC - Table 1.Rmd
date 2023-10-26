@@ -1,0 +1,96 @@
+---
+title: "VTFVC - Table one"
+output: word_document
+date: "2023-07-04"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r message=FALSE, warning=FALSE}
+#Knit this document to get Table 1 for MIMIC-IV and eICU patients in this analysis
+library(tableone)
+library(tidyverse)
+
+# Load tibbles with data from included patients
+miiv.included <- readRDS("miiv.included.Rds")
+eicu.included <- readRDS("eicu.included.Rds")
+
+# Define variable categories for tableone
+## normally distributed variables (apply parametric test, report SDs)
+t1.normal <- c('age', 'sex',  'height')
+## non-normally distributed (apply non-parametric test, report IQR)
+t1.nonnormal <- c('bmi', 'peep', 'plateau', 'dp', 'fio2', 'o2sat', 'safi', 'sofa',  'ccperkg','VFR')
+## categorical test (use Fisher's exact test)
+t1.cat <-c('mortality')
+
+# Create tableone objects for both cohorts, stratified by race
+t1.miiv <- CreateTableOne(
+  data = miiv.included %>%
+    mutate(peep = case_when(valid.dp ~ peep), 
+           plateau = case_when(valid.dp ~ plateau), 
+           dp = case_when(valid.dp ~ dp)) %>% 
+    mutate(race = factor(race, levels = c("WHITE", "BLACK", "OTHER"))
+           ),
+  vars = c(t1.cat, t1.normal, t1.nonnormal), 
+               strata = "race", 
+               factorVars = t1.cat, 
+               smd = T,addOverall = T) 
+
+t1.eicu <- CreateTableOne(
+  data = eicu.included %>% 
+        mutate(peep = case_when(valid.dp ~ peep), 
+           plateau = case_when(valid.dp ~ plateau), 
+           dp = case_when(valid.dp ~ dp)) %>% 
+    mutate(race = factor(race, levels = c("WHITE", "BLACK", "OTHER"))),
+  vars = c(t1.cat, t1.normal, t1.nonnormal), 
+               strata = "race", 
+               factorVars = t1.cat, 
+               smd = T,addOverall = T) 
+
+
+print(t1.miiv, nonnormal = t1.nonnormal,
+      contDigits = 1,
+      pDigits = 2,
+      explain = F) %>% kableone()
+print(t1.eicu, nonnormal = t1.nonnormal,
+      contDigits = 1,
+      pDigits = 2,
+      explain = F) %>% kableone()
+
+# Create tableone objects for both cohorts, stratified by sex
+t1.miiv <- CreateTableOne(
+  data = miiv.included %>%
+    mutate(peep = case_when(valid.dp ~ peep), 
+           plateau = case_when(valid.dp ~ plateau), 
+           dp = case_when(valid.dp ~ dp)) %>% 
+    mutate(race = factor(race, levels = c("WHITE", "BLACK", "OTHER"))
+           ),
+  vars = c(t1.cat, t1.normal, t1.nonnormal), 
+               strata = "sex", 
+               factorVars = t1.cat, 
+               smd = T,addOverall = T) 
+
+t1.eicu <- CreateTableOne(
+  data = eicu.included %>% 
+        mutate(peep = case_when(valid.dp ~ peep), 
+           plateau = case_when(valid.dp ~ plateau), 
+           dp = case_when(valid.dp ~ dp)) %>% 
+    mutate(race = factor(race, levels = c("WHITE", "BLACK", "OTHER"))),
+  vars = c(t1.cat, t1.normal, t1.nonnormal), 
+               strata = "sex", 
+               factorVars = t1.cat, 
+               smd = T,addOverall = T) 
+
+
+print(t1.miiv, nonnormal = t1.nonnormal,
+      contDigits = 1,
+      pDigits = 2,
+      explain = F) %>% kableone()
+print(t1.eicu, nonnormal = t1.nonnormal,
+      contDigits = 1,
+      pDigits = 2,
+      explain = F) %>% kableone()
+
+  
+```

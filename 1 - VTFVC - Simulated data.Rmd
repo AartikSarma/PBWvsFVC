@@ -1,0 +1,265 @@
+---
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+#Knit this Markdown file to generate tables and figures of simulated VT/FVC ratios
+library(tidyverse) 
+library(rspiro)
+
+dir.create("figures")
+dir.create("results")
+
+# Create a grid of simulated patient characteristics
+predicted.volumes <- 
+  expand.grid(
+    sex = c("Male", "Female"),
+    race = c("Black", "White", "NE Asian", "SE Asian", "Other"),
+    height = seq(150, 200, 1), 
+    age = seq(20, 80, by = 1) #Age range 20-80
+  )
+
+#Calculate PBW tidal volumes from ARDSNet, GLI FVC, and VFR for all subjects
+predicted.volumes <- predicted.volumes %>%
+  mutate(
+    sex_num = case_when(sex == "Male" ~ 1, 
+                        sex == "Female" ~ 2), 
+    race_num = case_when(
+      race == "White" ~ 1, 
+      race == "Black" ~ 2, 
+      race == "NE Asian" ~ 3, 
+      race == "SE Asian" ~ 4, 
+      race == "Other" ~ 5
+    )
+  ) %>%
+  mutate(ibw.volume = 
+           case_when(
+             sex == "Male" ~ 6 * ((50 + 2.3 * ((height/100 * 39.37) - 60))), 
+             sex == "Female" ~ 6 * ((45.5 + 2.3 * ((height/100 * 39.37) - 60)))
+           )) %>%
+  mutate(
+    gli.FVC = pred_GLI(age,height =  height/100, gender = sex_num, ethnicity = race_num, param = "FVC"), 
+    gli.FVC.lln = LLN_GLI(age,height =  height/100, gender = sex_num, ethnicity = race_num, param = "FVC"), 
+    VFR = 0.1 * ibw.volume/gli.FVC, 
+    VFR.LLN = 0.1 * ibw.volume/gli.FVC.lln, 
+  )
+
+#Determine the VFR for a hypothetical average ARMA patient
+ARMA6ccVFR <- predicted.volumes %>%
+  filter(sex == "Male", age == 51, height ==175, race == "White" ) %>%
+  pull(VFR)
+
+#Determine the VFR for an older, female, Black patient
+ARMA6ccVFR.blackfemale <- predicted.volumes %>%
+  filter(sex == "Female", age == 80, height ==162, race == "Black" ) %>%
+  pull(VFR)
+
+#Create a table with a subset of simulated values to plot
+volumes.to.plot <- 
+  predicted.volumes %>%
+  mutate(
+    pctFVC6 = VFR, 
+    pctFVC8 = VFR * 8/6, 
+    pctFVC10 = VFR * 10/6,
+    pctFVC12 = VFR * 12/6, 
+    pctFVC6.lln = VFR.LLN, 
+    pctFVC8.lln = VFR.LLN * 8/6, 
+    pctFVC10.lln = VFR.LLN * 10/6,
+    pctFVC12.lln = VFR.LLN * 12/6,
+    ) %>%
+  mutate(sex = factor(sex, levels = c("Female", "Male")),
+         race = factor(race, levels = c("White", "NE Asian", "SE Asian", "Black", "Other"))) %>%
+
+  filter(
+    (height == 175 & sex == "Male") |(height == 162 & sex == "Female"), #Filter the table to show values for average American heights
+         age <=80, 
+         age %% 10 == 0
+    ) 
+
+## ggplot objects that show the VFR range for a hypothetical average 
+## ARMA patient (Caucasian, 51 years old, male) in each arm of the study
+arma.high.range <- 
+  list(
+           geom_rect(aes(ymin = ARMA6ccVFR* 10/6, ymax = ARMA6ccVFR *12/6, xmin = 10, xmax = 100, fill = "red", alpha = 0.01)) ,
+           geom_hline(yintercept = ARMA6ccVFR * 10/6, linetype = "dashed", color = "red", linewidth = 1) , 
+           geom_hline(yintercept = ARMA6ccVFR * 12/6, linetype = "dashed", color = "red", linewidth = 1) 
+      )
+
+arma.low.range <- 
+  list(  geom_rect(aes(ymin = ARMA6ccVFR, ymax = ARMA6ccVFR * 8/6, xmin = 10, xmax = 100, fill = "blue", alpha = 0.01)) , 
+         geom_hline(yintercept = ARMA6ccVFR, linetype = "dashed", color = "blue", linewidth = 1) , 
+         geom_hline(yintercept = ARMA6ccVFR * 8/6, linetype = "dashed", color = "blue", linewidth = 1)  
+      )
+
+
+```
+
+```{r}
+#This figure is currently not included in the manuscript, but shows the VFR for 6cc/kg vs. GLI FVC across a range of ages and heights. The heatmaps suggset the effect of height is relatively small.
+predicted.volumes %>% 
+  mutate(race = factor(race, levels = c("White", "NE Asian", "SE Asian", "Black", "Other")))%>%
+  filter(age < 80) %>%
+  ggplot(aes(x = age, y = height, fill = VFR)) + facet_grid(sex~race) + 
+  geom_tile() + 
+  scale_fill_viridis_c(option = "F") + 
+  scale_y_continuous(breaks = seq(150,200,10)) + 
+  theme_classic()+ 
+  theme(aspect.ratio = 1, 
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 15),
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        panel.border = element_rect(size = 0, fill = NA), 
+        panel.spacing = unit(0.5, "cm"),
+        axis.line = element_blank()) + 
+  labs(x = "Age (years)", y = "Height (cm)")
+```
+
+
+```{r}
+vfr.plot <- list(scale_fill_identity() , 
+  scale_alpha_identity() , 
+  theme_classic() , 
+  theme(aspect.ratio = 1,
+        panel.border = element_rect(linewidth = 1, fill = NA),
+        panel.spacing = unit(2, "cm"),
+        axis.line = element_blank(),
+        axis.text = element_text(size = 32),
+        axis.title = element_text(size = 44), 
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 40), 
+        legend.position = "none") , 
+  labs(x = "Age (years)", 
+       y = "Vt/FVC ratio (%)", 
+       color = "") , 
+  scale_x_continuous(limits = c(16, 85), breaks = seq(20,80,10), oob = scales::squish) , 
+  scale_color_brewer(palette = "Dark2") , 
+  facet_grid(sex~race))
+
+volumes.to.plot %>%
+  ggplot() +
+  vfr.plot -> p1
+
+volumes.to.plot %>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range -> p2
+
+volumes.to.plot %>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range + 
+  arma.high.range-> p3
+
+volumes.to.plot%>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range + 
+  arma.high.range + 
+  geom_segment(data = subset(volumes.to.plot, (race == "White" & sex == "Male" & age == 50)) ,
+               aes(y = pctFVC6, yend = pctFVC8, x = age, xend = age), linewidth = 10) -> p4
+
+volumes.to.plot%>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range + 
+  arma.high.range + 
+  geom_segment(data = subset(volumes.to.plot, (race == "White" & sex == "Male")) ,
+               aes(y = pctFVC6, yend = pctFVC8, x = age, xend = age), linewidth = 10) -> p5
+
+volumes.to.plot%>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range + 
+  arma.high.range + 
+  geom_segment(data = subset(volumes.to.plot, (race == "White")) ,
+               aes(y = pctFVC6, yend = pctFVC8, x = age, xend = age), linewidth = 10) -> p6
+
+volumes.to.plot%>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range + 
+  arma.high.range + 
+  geom_segment(aes(y = pctFVC6, yend = pctFVC8, x = age, xend = age), linewidth = 10) -> p7
+
+volumes.to.plot%>%
+  ggplot() +
+  vfr.plot + 
+  arma.low.range + 
+  arma.high.range + 
+  geom_segment(aes(y = pctFVC6, yend = pctFVC8, x = age, xend = age), linewidth = 10) + 
+  geom_segment(aes(y = pctFVC6.lln, yend = pctFVC8.lln, x = age, xend = age), linewidth = 3, color = "grey50") -> p8
+
+pdf(file = "figures/Figure 1 - VFR for ARDSNet TV.pdf", width = 30, height = 12)
+p1
+p2
+p3
+p4
+p5
+p6
+p7
+p8
+dev.off()
+```
+
+# Table S1A - V~T~:FVC ratio for males
+```{r echo=FALSE}
+predicted.volumes %>% 
+  dplyr::select(sex, race, height, age, VFR) %>%
+  filter(age %% 10 == 0, height %% 10 == 0) %>% 
+  filter(sex == "Male") %>%
+  dplyr::select(-sex) %>%
+  pivot_wider(id_cols = c(age, height), names_from = race, values_from = VFR) %>%
+  dplyr::select(Age = age, Height = height, White, Black, "NE Asian", "SE Asian", "Other") %>%
+  knitr::kable(digits = 2) 
+```
+
+\newpage
+
+# Table S1B - V~T~:FVC ratio for females
+```{r echo=FALSE}
+predicted.volumes %>% 
+  dplyr::select(sex, race, height, age, VFR) %>%
+  filter(age %% 10 == 0, height %% 10 == 0) %>% 
+  filter(sex == "Female") %>%
+  dplyr::select(-sex) %>%
+  pivot_wider(id_cols = c(age, height), names_from = race, values_from = VFR) %>%
+  dplyr::select(Age = age, Height = height, White, Black, "NE Asian", "SE Asian", "Other") %>%
+  knitr::kable(digits = 2) 
+```
+
+
+
+## Table S5A - LLN vs. mean FVC
+```{r echo=FALSE}
+predicted.volumes %>% 
+  mutate(lln.mean.ratio = gli.FVC.lln/gli.FVC) %>% 
+  dplyr::select(sex, race, height, age, lln.mean.ratio) %>%
+  filter(age %% 10 == 0, height %% 10 == 0) %>% 
+  filter(sex == "Male") %>%
+  dplyr::select(-sex) %>%
+  pivot_wider(id_cols = c(age, height), names_from = race, values_from = lln.mean.ratio) %>%
+  dplyr::select(Age = age, Height = height, White, Black, "NE Asian", "SE Asian", "Other") %>%
+  knitr::kable(digits = 2) 
+```
+
+\newpage
+
+## Table S5B - V~T~:FVC ratio for females
+```{r echo=FALSE}
+predicted.volumes %>% 
+  mutate(lln.mean.ratio = gli.FVC.lln/gli.FVC) %>% 
+  dplyr::select(sex, race, height, age, lln.mean.ratio) %>%
+  filter(age %% 10 == 0, height %% 10 == 0) %>% 
+  filter(sex == "Female") %>%
+  dplyr::select(-sex) %>%
+  pivot_wider(id_cols = c(age, height), names_from = race, values_from = lln.mean.ratio) %>%
+  dplyr::select(Age = age, Height = height, White, Black, "NE Asian", "SE Asian", "Other") %>%
+  knitr::kable(digits = 2) 
+```
