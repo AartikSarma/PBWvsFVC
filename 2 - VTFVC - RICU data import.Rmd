@@ -7,8 +7,9 @@ editor_options:
 
 ## Patient populations
 ```{r loaddata}
-#This block is slow. Only rerun if imported tables need to be updated.
-# 
+#This section can be slow. Only rerun if imported tables need to be updated.
+#This code uses the very helpful RICU package to import data from PhysioNet. You'll need to set up the RICU package first: 
+#https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10268223/
 library(tidyverse)
 library(ricu)
 library(data.table)
@@ -24,6 +25,7 @@ vent.settings <- concept(
   ),
   description = c("tidalvolume", "peep", "plateau")
 )
+
 
 miiv.subjects <- miiv$icustays %>%
   as.data.table() %>%
@@ -107,12 +109,14 @@ saveRDS(eicu.sofa, "eicu.sofa.Rds")
 
 ```
 
+
 ```{r}
-miiv.subjects<- readRDS("miiv.subjects.Rds")
-miiv.vent<- readRDS("miiv.vent.Rds")
-miiv.sfratios<- readRDS("miiv.sfratios.Rds")
-miiv.demo<- readRDS( "miiv.demo.Rds")
-miiv.sofa<- readRDS( "miiv.sofa.Rds")
+# Merge patient tables by ICU stay and timempoint
+miiv.subjects<- readRDS("miiv.subjects.Rds") #Patient demographics
+miiv.vent<- readRDS("miiv.vent.Rds") #Ventilator settings
+miiv.sfratios<- readRDS("miiv.sfratios.Rds") #SF ratios
+miiv.demo<- readRDS( "miiv.demo.Rds")#Patient demographics
+miiv.sofa<- readRDS( "miiv.sofa.Rds") #SOFA scores
 
 miiv.df <-
   miiv.subjects %>%
@@ -125,10 +129,11 @@ miiv.df <-
 ```
 
 ```{r}
-eicu.vent <- readRDS("eicu.vent.Rds")
-eicu.sofa <- readRDS("eicu.sofa.Rds")
-eicu.sfratios <- readRDS("eicu.safi.Rds")
-eicu.demo <- readRDS("eicu.demo.Rds")
+# Merge patient tables by ICU stay and timempoint
+eicu.vent <- readRDS("eicu.vent.Rds") # Ventilator settings
+eicu.sofa <- readRDS("eicu.sofa.Rds") # SOFA scores 
+eicu.sfratios <- readRDS("eicu.safi.Rds") #SF ratios
+eicu.demo <- readRDS("eicu.demo.Rds") #Patient demographics
 
 
 
