@@ -60,7 +60,7 @@ saveRDS(miiv.sofa, "miiv.sofa.Rds")
 # ###
 
 vent.settings <- concept(
-  c("tv1", "tv2", "tv3", "tv4", "ventmode1", "ventmode2", "peep1", "peep2", "plateau"),
+  c("tv1", "tv2", "tv3", "tv4", "peep1", "peep2", "plateau"),
   list(
     item("eicu", "respiratorycharting", "respchartvaluelabel", "Tidal Volume (set)"), # Set tidal volume
         item("eicu", "respiratorycharting", "respchartvaluelabel", "Adult Con Setting Set Vt"), # Set tidal volume
@@ -70,7 +70,7 @@ vent.settings <- concept(
         item("eicu", "respiratorycharting", "respchartvaluelabel", "PEEP/CPAP"), # PEEP
     item("eicu", "respiratorycharting", "respchartvaluelabel", "Plateau Pressure") # Plateau
   ),
-  description = c("tvset1", "tvset2", "tvset3", "tvset4", "ventmode1", "ventmode2", "peep1", "peep2", "plateau"))
+  description = c("tvset1", "tvset2", "tvset3", "tvset4", "peep1", "peep2", "plateau"))
 
 ####
 eicu.patients <- eicu$patient %>%
