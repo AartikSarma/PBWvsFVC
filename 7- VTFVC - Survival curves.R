@@ -3,6 +3,7 @@ library(survival)
 library(ricu)
 library(lubridate)
 library(data.table)
+library(patchwork)
 
 miiv.included <-readRDS("miiv.included.Rds")
 censor_day <- 60
@@ -76,7 +77,7 @@ surv.plot <- ggplot(coxph.results, aes(x = time, y = estimate, fill = strata)) +
   labs(
        x = "Days since intubation",  
        y = "Probability of survival", 
-       color = "VFR") + 
+       color = "VT/FVC Ratio") + 
   theme_minimal() +
   theme(axis.text = element_text(size = 20), 
         axis.title = element_text(size = 20), 
@@ -112,6 +113,7 @@ n.at.risk <- coxph.results %>%
     axis.title.y = element_blank(),
     aspect.ratio = 1/6
     )
+
 
 pdf("figures/survival.curve.pdf", width = 10, height =8)
 surv.plot/n.at.risk

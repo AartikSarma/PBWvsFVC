@@ -101,7 +101,7 @@ arma.low.range <-
 ```
 
 ```{r}
-#This figure is currently not included in the manuscript, but shows the VFR for 6cc/kg vs. GLI FVC across a range of ages and heights. The heatmaps suggset the effect of height is relatively small.
+#This figure is currently not included in the manuscript, but shows the VFR for 6cc/kg vs. GLI FVC across a range of ages and heights. The heatmaps suggest the effect of height is relatively small.
 predicted.volumes %>% 
   mutate(race = factor(race, levels = c("White", "NE Asian", "SE Asian", "Black", "Other")))%>%
   filter(age < 80) %>%
@@ -208,7 +208,7 @@ p8
 dev.off()
 ```
 
-# Table S1A - V~T~:FVC ratio for males
+# V~T~:FVC ratio for males
 ```{r echo=FALSE}
 predicted.volumes %>% 
   dplyr::select(sex, race, height, age, VFR) %>%
@@ -222,7 +222,7 @@ predicted.volumes %>%
 
 \newpage
 
-# Table S1B - V~T~:FVC ratio for females
+# V~T~:FVC ratio for females
 ```{r echo=FALSE}
 predicted.volumes %>% 
   dplyr::select(sex, race, height, age, VFR) %>%
@@ -236,7 +236,7 @@ predicted.volumes %>%
 
 
 
-## Table S5A - LLN vs. mean FVC
+## LLN vs. mean FVC
 ```{r echo=FALSE}
 predicted.volumes %>% 
   mutate(lln.mean.ratio = gli.FVC.lln/gli.FVC) %>% 
@@ -251,7 +251,7 @@ predicted.volumes %>%
 
 \newpage
 
-## Table S5B - V~T~:FVC ratio for females
+## V~T~:FVC ratio for females
 ```{r echo=FALSE}
 predicted.volumes %>% 
   mutate(lln.mean.ratio = gli.FVC.lln/gli.FVC) %>% 
