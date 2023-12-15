@@ -93,7 +93,7 @@ miiv.included <- miiv.df %>%
   mutate(peep = case_when(valid.dp ~ peep),
          plateau = case_when(valid.dp ~ plateau), 
          dp = case_when(valid.dp ~ dp), 
-         crs = ccperkg/dp) %>%
+         crs = tidalvolume/dp) %>%
   arrange(-mortality, stay_id, -valid.dp, charttime) %>%
   distinct(subject_id, .keep_all = T) %>%
   as.data.frame 
@@ -103,7 +103,7 @@ eicu.included <- eicu.df  %>%
     mutate(peep = case_when(valid.dp ~ peep),
          plateau = case_when(valid.dp ~ plateau), 
          dp = case_when(valid.dp ~ dp), 
-         crs = ccperkg/dp) %>%
+         crs = tidalvolume/dp) %>%
   arrange(-mortality, patientunitstayid, -valid.dp, respchartoffset) %>%
   distinct(uniquepid, .keep_all = T) %>%
   as.data.frame 

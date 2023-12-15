@@ -307,6 +307,13 @@ run_analysis(exclusion_criteria = "valid.dp", analysis_description = "Adjust for
              regression_labs = c('Respiratory compliance', 'VFR', 'Tidal volume\n(cc/kg)', 'SOFA', 'SaO2:FiO2 ratio*', 'Male', 'Age*', 'Other vs. White', 'Black vs. White'))
 run_analysis(exclusion_criteria = "safi <=235", analysis_description = "Low SF ratio",
              regression_labs = c('VFR', 'Tidal volume\n(cc/kg)', 'SOFA', 'SaO2:FiO2 ratio*', 'Male', 'Age*', 'Other vs. White', 'Black vs. White'))
-run_analysis(exclusion_criteria = "ccperkg <= 6.5", analysis_description = "Low VT",
-             regression_labs = c('VFR', 'Tidal volume\n(cc/kg)', 'SOFA', 'SaO2:FiO2 ratio*', 'Male', 'Age*', 'Other vs. White', 'Black vs. White'))
 
+
+# run_analysis(exclusion_criteria = "ccperkg <= 6.5", analysis_description = "Low VT",
+#              regression_labs = c('VFR', 'Tidal volume\n(cc/kg)', 'SOFA', 'SaO2:FiO2 ratio*', 'Male', 'Age*', 'Other vs. White', 'Black vs. White'))
+# run_analysis(exclusion_criteria = "age>70", analysis_description = "Older patients",
+#              regression_labs = c('VFR', 'Tidal volume\n(cc/kg)', 'SOFA', 'SaO2:FiO2 ratio*', 'Male', 'Age*', 'Other vs. White', 'Black vs. White'))
+# 
+# run_analysis(exclusion_criteria = "age<30", analysis_description = "Younger patients",
+#              regression_labs = c('VFR', 'Tidal volume\n(cc/kg)', 'SOFA', 'SaO2:FiO2 ratio*', 'Male', 'Age*', 'Other vs. White', 'Black vs. White'))
+# 
