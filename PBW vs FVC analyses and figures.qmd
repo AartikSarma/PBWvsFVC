@@ -1,0 +1,2652 @@
+---
+title: "R Notebook"
+format:
+  docx:                    # 'word_document' becomes 'docx' in Quarto
+    fig-width: 6          # note the hyphen instead of underscore
+    fig-height: 9.5
+    fig-caption: true
+  html: default           # 'html_notebook' becomes 'html'
+  pdf: default           # 'pdf_document' becomes 'pdf'
+editor: source
+prefer-html: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup and Library Loading
+
+```{r}
+# Clear environment
+rm(list = ls())
+
+# List of required packages with descriptions
+required_packages <- c(
+  # Core data manipulation and visualization
+  "tidyverse",      # Collection of packages including dplyr, ggplot2, tidyr, readr, etc.
+  "patchwork",      # Combining multiple ggplot plots
+  "data.table",     # Fast data manipulation for large datasets
+  "scales",         # Scaling functions for visualizations
+
+  # Statistical modeling
+  "lme4",           # Linear mixed-effects models 
+  "lmerTest",       # Tests for linear mixed-effects models
+  "broom",          # Convert statistical objects into tidy data frames
+  "broom.mixed",    # Extension of broom for mixed-effects models
+  "AICcmodavg",     # Model selection based on AIC
+  "marginaleffects", # Calculate marginal effects from models
+  "modelsummary",   # Create summary tables for statistical models
+
+  # Causal inference and DAGs
+  "dagitty",        # Create and analyze directed acyclic graphs
+  "ggdag",          # Visualize directed acyclic graphs
+  
+  # Specialized plotting and visualization
+  "ggpubr",         # Publication-ready plots
+  "ggbeeswarm",     # Create beeswarm plots (a variation of jitter/strip plots)
+  
+  # Parallel processing
+  "furrr",          # Parallel processing using future and purrr
+  
+  # Survival analysis
+  "survival",       # Survival analysis
+  "survminer",      # Visualization for survival analysis
+  
+  # Date and time manipulation
+  "lubridate",      
+  
+  # Document creation
+  "officer",        # Manipulate Word and PowerPoint documents 
+  "flextable"     # Create tables for documents
+)
+
+# Check if packages are installed, install if they're not
+missing_packages <- required_packages[!required_packages %in% installed.packages()[,"Package"]]
+
+if(length(missing_packages) > 0) {
+  cat("Installing missing packages:", paste(missing_packages, collapse = ", "), "\n")
+  install.packages(missing_packages, dependencies = TRUE)
+} else {
+  cat("All required packages are already installed.\n")
+}
+
+# Load all required packages
+for(pkg in required_packages) {
+  cat("Loading package:", pkg, "\n")
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+# Print session information for reproducibility
+cat("\nSession information:\n")
+sessionInfo()
+
+cat("\nSetup complete. All required packages are installed and loaded.\n")
+```
+
+
+# Data Loading and Initial Processing
+
+```{r}
+# Set working directory
+setwd("~/Research/VFRatio/")
+
+# Load datasets
+miiv.included <- readRDS("miiv.included.Rds")     # MIMIC-IV dataset
+eicu.included <- readRDS("eicu.included.Rds")     # eICU dataset
+miiv.survtime <- readRDS("miiv.survivaltime.Rds") # Survival time data
+
+# Join survival time data to MIMIC-IV dataset and process survival days
+miiv.included <- 
+  miiv.included %>%
+  left_join(miiv.survtime) %>%
+  mutate(survdays = ceiling(survdays)) %>%
+  mutate(survdays = case_when(survdays >= 0 ~ survdays))
+```
+
+# Data Harmonization Between MIMIC-IV and eICU Datasets
+
+```{r}
+# Identify columns unique to MIMIC-IV dataset
+colnames(miiv.included)[which(!(colnames(miiv.included) %in% colnames(eicu.included)))]
+
+# Rename columns in MIMIC-IV dataset for consistency
+miiv.included <- miiv.included %>%
+  dplyr::rename(
+    subjectid = subject_id, 
+    raceethnicity = race0 
+  ) %>%
+  dplyr::select(-hospital_expire_flag, -FVC_fixed_age, -VFR_fixed_age,-VFR, -ccperkg)
+
+# Identify columns unique to eICU dataset
+#colnames(eicu.included)[which(!(colnames(eicu.included) %in% colnames(miiv.included)))]
+
+# Rename columns in eICU dataset for consistency
+eicu.included <- eicu.included %>%
+  dplyr::rename(
+    subjectid = uniquepid, 
+    raceethnicity = ethnicity
+  ) %>%
+  dplyr::select(-hospitaldischargestatus, -FVC_fixed_age, -VFR_fixed_age,-VFR, -ccperkg)
+```
+
+# Data Processing and Feature Engineering
+
+```{r}
+# Process both datasets with consistent transformations
+updated_dfs <- list(miiv.included, eicu.included) %>%
+  map(~ .x %>%
+        dplyr::rename(pfvc = FVC) %>%
+     mutate(
+       sex = factor(sex) %>% relevel("Male"), # Set Male as reference level
+       race = factor(race, levels = c("WHITE", "OTHER", "BLACK")),
+       # Create age bins in 10-year intervals
+       age_bin = cut(age, seq(20, 90, 10), 
+                     labels = c("20-29", "30-39", "40-49", "50-59", "60-69", "70-79", "80-89")), 
+       # Create BMI bins in 5-unit intervals
+       bmi_bin = cut(bmi, seq(15, 50, 5)), 
+       # Calculate weight from BMI and height
+       weight = bmi * (height/100)^2,
+       # Create combined race-sex groups
+       groups = paste0(race, sex) %>%
+         factor %>%
+         relevel("WHITEMale")  
+       )
+  )
+
+# Calculate additional clinical variables
+updated_dfs <-  updated_dfs %>% 
+  map(~ .x %>% mutate(
+       tidalvolume = tidalvolume, 
+       pfvcpbw = pfvc/pbw,               # PFVC to predicted body weight ratio
+       pbwpfvc = pbw/pfvc,               # Predicted body weight to PFVC ratio
+       pbw_inv = 1/pbw,                # Inverse of predicted body weight
+       pfvc_inv = 1/pfvc,                # Inverse of PFVC
+       vtpbw = tidalvolume/pbw,        # Tidal volume to predicted body weight ratio
+       vtpfvc = tidalvolume/pfvc * 0.1,  # Tidal volume to PFVC ratio (scaled)
+       ers = static_dp/tidalvolume * 1000,  # Static elastance
+       ers_vtpbw = static_dp/vtpbw,    # Elastance normalized to VT/PBW
+       ers_vtpfvc = static_dp/vtpfvc,    # Elastance normalized to VT/PFVC
+       ers_dynamic = dynamic_dp/tidalvolume,  # Dynamic elastance
+       crs_dynamic = tidalvolume/dynamic_dp,  # Dynamic compliance
+       ers_dynamic_vtpbw = dynamic_dp/vtpbw,  # Dynamic elastance normalized to VT/PBW
+       ers_dynamic_vtpfvc = dynamic_dp/vtpfvc   # Dynamic elastance normalized to VT/PFVC
+  ) 
+  
+  )
+# Update datasets with processed data
+miiv.included <- updated_dfs[[1]]
+eicu.included <- updated_dfs[[2]] %>%
+  mutate(hospitalid = as.character(hospitalid)) 
+
+rm(updated_dfs)  # Clean up temporary variable
+```
+
+# Directed Acyclic Graph (DAG) for Causal Relationships
+
+```{r}
+#| fig-height: 6
+#| fig-width: 10
+# Create a DAG to visualize hypothesized causal relationships
+dag <- dagitty(
+'dag {
+  "Aerated lung size" [latent,pos="-0.3,-0.8"]
+  "Driving pressure" [pos="1.0,-0.7"]
+  "Injured lung elastance" [latent,pos="-0.3,-1.0"]
+  "PBW/PFVC" [pos="-0.9,-0.55"]
+  "Pleural pressure" [latent,pos="1.0,-1.2"]
+  "Pre-injury lung elastance" [latent,pos="-1.5,-1.0"]
+  "Pre-injury lung size" [latent,pos="-1.4,-0.8"]
+  "Severity of illness" [pos="-0.3,0.0"]
+  "Severity of lung injury" [pos="-0.2,-0.5"]
+  "Tidal volume" [pos="-0.5,-0.2"]
+  "VT/PFVC" [pos="-0.75,-0.7"]
+  "VT/PBW" [pos="-0.75,-0.4"]
+  BMI [pos="-1.8,-1.2"]
+  Demographics [pos="-1.8,0.0"]
+  Compliance [pos="1.0,-0.2"]
+  PFVC [pos="-1.3,-0.7"]
+  Mortality [pos="0.5,0.0"]
+  PBW [pos="-1.3,-0.4"]
+  PEEP [pos="0.7,-0.7"]
+  Plateau [pos="1.0,-1.0"]
+  Strain [latent,pos="0.5,-0.4"]
+  Stress [latent,pos="0.5,-1.0"]
+  VILI [latent,pos="0.9,0.0"]
+  "Aerated lung size" -> "Injured lung elastance"
+  "Aerated lung size" -> Strain
+  "Driving pressure" -> Compliance
+  "Injured lung elastance" -> Stress
+  "Pleural pressure" -> Plateau
+  "Pre-injury lung elastance" -> "Injured lung elastance"
+  "Pre-injury lung size" -> "Aerated lung size"
+  "Severity of illness" -> "Tidal volume"
+  "Severity of illness" -> Mortality
+  "Severity of lung injury" -> "Aerated lung size"
+  "Severity of lung injury" -> "Severity of illness"
+  "Severity of lung injury" -> "Tidal volume"
+  "Severity of lung injury" -> Mortality
+  "Tidal volume" -> "VT/PFVC"
+  "Tidal volume" -> "VT/PBW"
+  "Tidal volume" -> Compliance
+  "Tidal volume" -> Strain
+  BMI -> "Pleural pressure"
+  Demographics -> "Pre-injury lung elastance"
+  Demographics -> "Pre-injury lung size"
+  Demographics -> "Tidal volume"
+  Demographics -> BMI
+  Demographics -> PFVC
+  Demographics -> PBW
+  PFVC -> "PBW/PFVC"
+  PFVC -> "VT/PFVC"
+  PBW -> "PBW/PFVC"
+  PBW -> "VT/PBW"
+  PEEP -> "Driving pressure"
+  PEEP -> Strain
+  Plateau -> "Driving pressure"
+  Strain -> Stress
+  Strain -> VILI
+  Stress -> Plateau
+  VILI -> Mortality
+}
+'
+  
+)
+
+pdf("LRM - R1 - Figures/New DAG.pdf", height = 5, width = 8)
+dag %>%
+  tidy_dagitty() %>% 
+  mutate(name = str_wrap(name, width =10)) %>%
+  ggplot(aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_text(aes(label = name), size = 2.5,fontface = "bold")  + 
+  geom_dag_edges_diagonal(arrow =
+                            grid::arrow(length = grid::unit(10, "pt"), 
+                                        type = "closed")) + 
+  theme_dag()
+dev.off()
+
+```
+
+# Mortality Models - Formula Definition
+
+```{r}
+# Define a list of model formulas for mortality analysis
+mort_formula_list <- list(
+  # Basic models examining different predictors
+  "VT/PBW" = mortality ~ scale(vtpbw) + scale(age)+sex+race  + scale(safi) + scale(sofa),
+  "VT/PFVC" = mortality ~ scale(vtpfvc) + scale(age)+sex+race  + scale(safi) + scale(sofa),
+  "VT/PBW + PFVC" = mortality ~ scale(pfvc) + scale(vtpbw) + scale(age)+sex+race  + scale(safi) + scale(sofa),
+  "VT/PBW + VT/PFVC" = mortality ~ scale(vtpfvc) + scale(vtpbw) + scale(age)+sex+race  + scale(safi) + scale(sofa),
+  "PBW/PFVC" = mortality ~ scale(pbwpfvc) + 
+    scale(vtpbw) +
+    scale(tidalvolume) +
+    scale(age)+sex+race + scale(safi) + scale(sofa), 
+  
+  # Models with interaction terms for demographic factors
+  "VT/PBW - interaction" = mortality ~ scale(vtpbw) + scale(age)*sex*race  + scale(safi) + scale(sofa),
+  "VT/PFVC - interaction" = mortality ~ scale(vtpfvc) + scale(age)*sex*race  + scale(safi) + scale(sofa),
+  "VT/PBW + PFVC - interaction" = mortality ~ scale(pfvc) + scale(vtpbw) + scale(age)*sex*race  + scale(safi) + scale(sofa),
+  "VT/PBW + VT/PFVC - interaction" = mortality ~ scale(vtpfvc) + scale(vtpbw) + scale(age)*sex*race  + scale(safi) + scale(sofa),
+  "PBW/PFVC - interaction" = mortality ~ scale(pbwpfvc) +
+    scale(vtpbw) +
+    scale(tidalvolume) +
+    scale(age)*sex*race + scale(safi) + scale(sofa)
+  )
+
+# Save the model formula names
+name_list <- names(mort_formula_list)
+
+
+```
+
+# Utility Function for Formula Manipulation
+
+```{r}
+# Function to replace specific terms in formulas
+replace_formula_terms <- function(formula_list, old_term, new_term) {
+  # Convert formulas to character strings if they aren't already
+  formulas_chr <- if(is.character(formula_list)) {
+    formula_list
+  } else {
+    # Use deparse() instead of as.character() to get the full formula as a single string
+    map_chr(formula_list, ~ deparse(.x, width.cutoff = 500L))
+  }
+  
+  # Create the replacement pattern
+  # This ensures we only replace the exact term, not partial matches
+  pattern <- paste0("\\b", old_term, "\\b")
+  
+  # Replace the terms and convert back to formula objects
+  new_formulas <- formulas_chr %>%
+    str_replace_all(pattern, new_term) %>%
+    map(~ as.formula(.x))
+  
+  return(new_formulas)
+}
+```
+
+# Driving Pressure and Compliance Models - Formula Definition
+
+```{r}
+# Create formulas for driving pressure (dp) and compliance (crs) models
+dp_formula_list <- 
+  mort_formula_list %>%
+  map(~update.formula(old = ., new = static_dp ~ . + scale(bmi)))%>%
+  append(
+    list(
+  "VT/PBW - unadjusted" = static_dp ~ scale(vtpbw),
+  "VT/PFVC - unadjusted" = static_dp ~ scale(vtpfvc),
+  "PBW/PFVC - unadjusted" = static_dp ~ scale(pbwpfvc)
+    )) %>%
+  append(
+    mort_formula_list %>%
+      map(~update.formula(old = ., new = (crs) ~ .+ scale(bmi))) %>%
+      replace_formula_terms("vtpfvc", "pfvc") %>%
+      replace_formula_terms("vtpbw", "pbw") %>%
+        append(
+    list(
+  "PBW - unadjusted" = crs ~ scale(pbw),
+  "PFVC - unadjusted" = crs ~ scale(pfvc),
+  "PBW/PFVC - unadjusted" = crs ~ scale(pbwpfvc)
+    )
+     ) 
+  )
+
+# Rename models to indicate whether they're for driving pressure or compliance
+names(dp_formula_list) <- c(paste(
+    rep("DP", length(dp_formula_list)/2), 
+    names(dp_formula_list)[1:(length(dp_formula_list)/2)]
+          ), 
+  paste(
+    rep("Crs", length(dp_formula_list)/2), 
+    names(dp_formula_list)[1:(length(dp_formula_list)/2)] %>% str_remove("VT\\/")
+          ))
+ 
+# Get number of models for later use
+n_models <- length(mort_formula_list)
+```
+
+# Extended Mortality Models - Incorporating Driving Pressure
+
+```{r}
+# Create versions of mortality models that include static driving pressure
+mort_and_dp_formula_list <- mort_formula_list  %>%
+  map(~update.formula(old = ., new = . ~ . + scale(static_dp))) %>%
+  append(mortality ~ scale(age)+sex+race + scale(safi) + scale(sofa) + scale(static_dp))
+
+# Name the models
+names(mort_and_dp_formula_list) <- c(paste("Static DP + ", names(mort_formula_list)), "Static DP")
+
+# Combine all mortality model formula lists
+mort_formula_list <- mort_formula_list %>%
+  append(
+    list(
+  "VT/PBW - unadjusted" = mortality ~ scale(vtpbw),
+  "VT/PFVC - unadjusted" = mortality ~ scale(vtpfvc),
+  "PBW/PFVC - unadjusted" = mortality ~ scale(pbwpfvc)
+    )) %>%
+  append(mort_and_dp_formula_list) %>%
+  append(
+    list(
+      "Static DP + VT/PBW - unadjusted" = mortality ~ scale(vtpbw) + scale(static_dp),
+      "Static DP + VT/PFVC - unadjusted" = mortality ~ scale(vtpfvc) + scale(static_dp),
+      "Static DP + PBW/PFVC - unadjusted" = mortality ~ scale(pbwpfvc) + scale(static_dp)
+    )
+  )
+
+```
+
+# Model Fitting with Parallel Processing
+
+```{r}
+plan(multisession, workers = 10)  # Set up parallel processing
+
+# Fit mortality models for MIMIC-IV dataset
+miiv_mort_models <- 
+  mort_formula_list%>%
+  future_map(.progress = T, ~glm(., family = binomial,
+           data = miiv.included))
+
+# Fit mortality models for eICU dataset with random effects for hospital
+eicu_mort_models <- mort_formula_list %>% 
+  future_map(.progress = T, ~update.formula(old = ., new = ~ .+ (1|hospitalid))) %>%
+  future_map(.progress = T, ~glmer(., family = binomial, data = eicu.included))
+
+# Fit driving pressure models for MIMIC-IV dataset
+miiv_pressure_models <- 
+  dp_formula_list%>%
+  future_map(.progress = T, ~lm(., data = miiv.included))
+
+# Fit driving pressure models for eICU dataset with random effects for hospital
+eicu_pressure_models <- dp_formula_list %>% 
+  future_map(.progress = T, ~update.formula(old = ., new = ~ .+ (1|hospitalid))) %>%
+  future_map(.progress = T, ~lmerTest::lmer(., data = eicu.included, REML = F))
+
+# Separate models by outcome type for easier analysis
+miiv_dp_models <- names(miiv_pressure_models) %>% str_detect("DP") %>% which %>% 
+  miiv_pressure_models[.]
+miiv_compliance_models <- names(miiv_pressure_models) %>% str_detect("Crs") %>% which %>% 
+  miiv_pressure_models[.]
+eicu_dp_models <- names(eicu_pressure_models) %>% str_detect("DP") %>% which %>% 
+  eicu_pressure_models[.]
+eicu_compliance_models <- names(eicu_pressure_models) %>% str_detect("Crs") %>% which %>% 
+  eicu_pressure_models[.]
+
+#names(miiv_dp_models)  # Print names of MIMIC-IV driving pressure models
+```
+
+# Plot Settings for Binned Regression Analysis
+
+```{r}
+# Set up binning and visualization parameters for regression analysis
+bin_names <- paste("Bin", 1:10)
+color_palette <- c("WHITE Male" = "red",
+                   "WHITE Female" = scales::muted("red"), 
+                   "BLACK Male" = "blue",
+                   "BLACK Female" = scales::muted("blue"),
+                   "OTHER Male" = "purple",
+                   "OTHER Female" = scales::muted("purple"))
+dodge_width <- 0.1
+
+# Define common plot elements for binned regression plots
+binned_regression_plots <-
+  list(geom_point(aes(y = estimate), position = position_dodge(width = dodge_width)), 
+       geom_segment(aes(y = conf.low, yend = conf.high), alpha = 0.5, position = position_dodge(width = dodge_width)), 
+       geom_smooth(aes(y = estimate), se = F), 
+       theme_bw())
+```
+
+# Variable Label Definitions for Tables and Plots
+
+```{r}
+# Define readable labels for model coefficients
+coef_labels <- 
+  c(pfvc = "PFVC (L)", 
+    raceBLACK = "Black vs. white",
+    raceOTHER = "Other vs. white", 
+    sexFemale = "Female vs. male",
+    `scale(pfvc)` = "PFVC", 
+    `scale(age)` = "Age", 
+    `scale(safi)` = "SF Ratio", 
+    `scale(sofa)` = "SOFA score", 
+    `scale(tidalvolume)` = "Tidal volume", 
+    `scale(height)` = "Height", 
+    `scale(pbw)` = "PBW", 
+    `scale(pbwpfvc)` = "PBW/PFVC",
+    `scale(pfvcpbw)` = "PFVC/PBW",
+    `scale(vtpfvc)` = "VT/PFVC", 
+    `scale(vtpbw)` = "VT/PBW", 
+    `scale(pbwpfvc2022)` = "PBW/PFVC (GLI 2022)", 
+    `scale(pbwpfvc_age25)` = "PBW/PFVC (age 25)", 
+    `scale(static_dp)`= "Driving pressure", 
+   `(vtpfvc2022)` = "PFVC (GLI 2022)",
+    `scale(vtpfvc_age25)` = "VT/PFVC (age 25)",
+   `scale(pfvc_age25)` = "PFVC (age 25)",
+    `scale(pfvc2022)` = "PFVC (GLI 2022)", 
+    `scale(pfvc_inv)` = "1/PFVC",
+   `scale(pbw_inv)` = "1/PBW",
+   `scale(pfvc_inv2022)` = "1/PFVC (GLI 2022)",
+    `scale(pfvc_inv_age25)` = "1/PFVC (age 25)", 
+    `scale(peep)` = "PEEP", 
+   `scale(bmi)` = "BMI"
+    )
+
+# Define significance level labels for tables
+sig_labels <-  c('*'= 0.05, 
+                       '**'= 0.01, 
+                       '***'= 0.001)
+table_sig_figs <- fmt_decimal(2, pdigits = 3)  # Format for decimal places in tables
+```
+
+# Regression Table Creation Function
+
+```{r}
+
+# Define a function to create formatted regression tables in Word format
+create_regression_tables <- function(model_list, 
+                                   output_file = "regression_tables.docx",
+                                   term_labels = NULL,
+                                   digits = 3,
+                                   transform_fn = NULL,
+                                   header_format = NULL) {
+  
+  # Create new Word document
+  doc <- read_docx()
+  
+  # Set document properties
+  doc <- set_doc_properties(doc,
+    title = "Regression Tables",
+    creator = "R"
+  )
+  
+  # Create section properties for landscape orientation
+  sect_prop <- prop_section(
+    page_size = page_size(
+      orient = "landscape",
+      width = 11,
+      height = 8.5
+    ),
+    type = "continuous"
+  )
+  
+  # Apply section properties and margins
+  doc <- body_end_section_continuous(doc, sect_prop) %>%
+    page_mar(
+      bottom = 0.5,
+      top = 0.5,
+      right = 0.5,
+      left = 0.5,
+      header = 0.5,
+      footer = 0.5,
+      gutter = 0
+    )
+  
+  # Default header format if none provided
+  default_header_format <- fp_text(
+    font.size = 12,
+    bold = TRUE,
+    font.family = "Arial",
+    color = "black"
+  )
+  
+  header_format <- if (is.null(header_format)) default_header_format else header_format
+  
+  # Function to format interaction terms
+  format_interaction_term <- function(term, term_labels) {
+    if (grepl(":", term)) {
+      # Split the interaction term
+      parts <- strsplit(term, ":")[[1]]
+      
+      # Format each part
+      formatted_parts <- sapply(parts, function(part) {
+        if (part %in% names(term_labels)) {
+          term_labels[part]
+        } else {
+          part
+        }
+      })
+      
+      # Join with "×" (multiplication symbol)
+      paste(formatted_parts, collapse = " × ")
+    } else {
+      if (term %in% names(term_labels)) {
+        term_labels[term]
+      } else {
+        term
+      }
+    }
+  }
+  
+  # Function to add significance stars
+  add_stars <- function(p_value) {
+    if (is.na(p_value)) return("")
+    if (p_value < 0.001) return("***")
+    if (p_value < 0.01) return("**")
+    if (p_value < 0.05) return("*")
+    return("")
+  }
+  
+  # Function to format estimate and SE
+  format_est_se <- function(estimate, se, digits, stars) {
+    estimate_rounded <- round(estimate, digits)
+    se_rounded <- round(se, digits)
+    paste0(
+      format(estimate_rounded, digits = digits, nsmall = digits),
+      stars,
+      "\n(",
+      format(se_rounded, digits = digits, nsmall = digits),
+      ")"
+    )
+  }
+  
+  # Process each main entry in the model list
+  for (model_group_name in names(model_list)) {
+    model_sublist <- model_list[[model_group_name]]
+    print(model_group_name)
+    
+    # Get all unique terms across models
+    all_terms <- unique(unlist(lapply(model_sublist, function(model) {
+      tidy(model)$term
+    })))
+    
+    # Create a data frame to store all results
+    results_list <- lapply(names(model_sublist), function(model_name) {
+      model <- model_sublist[[model_name]]
+      
+      # Get model results
+      model_results <- tidy(model)
+      
+      # Apply transformation if specified
+      if (!is.null(transform_fn)) {
+        if ("estimate" %in% names(model_results)) {
+          model_results$estimate <- transform_fn(model_results$estimate)
+        }
+        if ("std.error" %in% names(model_results)) {
+          model_results$std.error <- transform_fn(model_results$std.error)
+        }
+      }
+      
+      # Add significance stars
+      model_results$stars <- sapply(model_results$p.value, add_stars)
+      
+      # Format estimate and SE together
+      model_results$formatted_result <- mapply(
+        format_est_se,
+        model_results$estimate,
+        model_results$std.error,
+        MoreArgs = list(digits = digits),
+        model_results$stars
+      )
+      
+      # Create a named vector of results
+      results_vector <- model_results$formatted_result
+      names(results_vector) <- model_results$term
+      
+      # Create a complete vector with all terms
+      complete_results <- rep(NA_character_, length(all_terms))
+      names(complete_results) <- all_terms
+      complete_results[names(results_vector)] <- results_vector
+      
+      complete_results
+    })
+    
+    # Combine results into a data frame
+    results_df <- data.frame(
+      term = all_terms,
+      stringsAsFactors = FALSE
+    )
+
+# Add model names as columns
+    for (i in seq_along(results_list)) {
+      results_df[[names(model_sublist)[i]]] <- results_list[[i]]
+    }
+    
+    # Format term labels including interactions
+    if (!is.null(term_labels)) {
+      results_df$term <- sapply(
+        results_df$term,
+        format_interaction_term,
+        term_labels = term_labels
+      )
+    }
+    
+    # Add model statistics (N and AIC) at the bottom
+    n_obs <- sapply(model_sublist, function(model) {
+      if ("nobs" %in% names(model)) {
+        return(model$nobs)
+      } else {
+        return(nrow(model.frame(model)))
+      }
+    })
+    
+    aic_values <- sapply(model_sublist, function(model) {
+      tryCatch({
+        round(AIC(model), digits)
+      }, error = function(e) {
+        return(NA)
+      })
+    })
+    
+    # Add rows for N and AIC
+    n_row <- c("N", sapply(n_obs, function(n) format(n, big.mark = ",")))
+    aic_row <- c("AIC", sapply(aic_values, function(aic) {
+      if (is.na(aic)) return("—")
+      format(aic, digits = digits, nsmall = digits)
+    }))
+    
+    # Add blank row before model statistics
+    blank_row <- rep("", ncol(results_df))
+    names(blank_row) <- names(results_df)
+    
+    # Bind the new rows
+    results_df <- rbind(
+      results_df,
+      blank_row,
+      n_row,
+      aic_row
+    )
+    
+    # Create flextable
+    ft <- flextable(results_d) %>%
+      theme_vanilla() %>%
+      autofit()
+    
+    # Set header labels and format
+    header_labels <- list(term = "Term")
+    header_labels[names(model_sublist)] <- names(model_sublist)
+    ft <- set_header_labels(ft, values = header_labels)
+    
+    # Apply header formatting
+    ft <- ft %>%
+      style(
+        part = "header",
+        pr_t = header_format
+      )
+    
+    # Format the table
+    ft <- ft %>%
+      align(j = -1, align = "center") %>%  # Center all columns except term
+      align(j = 1, align = "left") %>%     # Left align term column
+      fontsize(size = 10) %>%
+      padding(padding = 4)
+    
+    # Add border above model statistics
+    ft <- ft %>%
+      hline(
+        i = nrow(results_df) - 3,  # Position before the blank row
+        border = fp_border(color = "black", width = 1)
+      )
+    
+    # Add to document with custom heading format
+    doc <- doc %>%
+      body_add_par(
+        value = model_group_name,
+        style = "heading 1",
+        pos = "after"
+      ) %>%
+      body_add_flextable(ft) %>%
+      body_add_par("* p < 0.05, ** p < 0.01, *** p < 0.001", style = "Normal") %>%
+      body_add_break()
+  }
+  
+  # Add legend at the end
+  doc <- doc %>%
+    body_add_par("Note: Coefficients are shown with standard errors in parentheses.", 
+                 style = "Normal")
+  
+  # Save document
+  print(doc, target = output_file)
+}
+```
+
+
+# Survival Analysis Setup
+
+```{r}
+
+# Define censoring timepoint for survival analysis
+censor_day <- 60
+
+# Prepare survival data with appropriate coding for censoring
+surv.time <- 
+  miiv.included %>% 
+  mutate(age = age, safi = safi) %>%
+  mutate(
+    # Censor survival days at cutoff value
+    survdays = case_when(
+      survdays > censor_day ~ censor_day,
+      is.na(survdays) ~ censor_day, 
+      TRUE ~ survdays
+    ),
+    # Create indicator for event (1) or censoring (0)
+    surv01 = case_when(
+    survdays < censor_day ~ 1, 
+    TRUE ~ 0
+  )) %>% 
+  mutate(timeint = survdays) %>% 
+  #Two subjects have data entry errors
+  #Date of death many years prior to admission
+  filter(survdays > -1) %>% #Because date of death does not include time of death, but intubation time is recorded by hour, R assumes time of death is 00:00 and calculates a small negative value for survival time 
+  mutate(strata_var = Hmisc::cut2(pbwpfvc, g = 3))
+# Define formulas for survival analysis models
+surv_formula_list <- list(
+  "VT/PBW"= Surv(survdays, surv01) ~ scale(vtpbw) + 
+    race + sex + scale(age) + scale(safi) + scale(sofa), 
+  "VT/PFVC"   = Surv(survdays, surv01) ~ scale(vtpfvc) + 
+    race + sex + scale(age) + scale(safi) + scale(sofa), 
+  "VT/PBW + PFVC" = Surv(survdays, surv01) ~ scale(pfvc) + scale(vtpbw) +  
+    race + sex + scale(age) + scale(safi) + scale(sofa), 
+  "VT/PBW + VT/PFVC"  = Surv(survdays, surv01) ~ scale(vtpfvc) + scale(vtpbw)  +
+    race + sex + scale(age) + scale(safi) + scale(sofa),
+  "PBW/PFVC"  = Surv(survdays, surv01) ~ scale(pbwpfvc) +
+    scale(vtpbw) + 
+    scale(tidalvolume) + 
+    race + sex + scale(age) + scale(safi) + scale(sofa) 
+)
+
+# Fit Cox proportional hazards models
+coxph_model_list <- surv_formula_list %>%
+  map(~coxph(formula = .x, data = surv.time))
+
+# Create survival curves at different percentiles of PBW/PFVC ratio
+surv_curve_list <- 
+  coxph_model_list[5] %>%
+  map(~survfit(.x, newdata = data.frame(
+  pbwpfvc = quantile(surv.time$pbwpfvc, probs= c(0.1, 0.25, 0.5, 0.75, 0.9)), 
+  race = "WHITE", 
+  sex = "Male", 
+  vtpbw = quantile(surv.time$vtpbw, probs= c(0.1, 0.25, 0.5, 0.75, 0.9)),
+  vtpfvc = quantile(surv.time$vtpfvc, probs= c(0.1, 0.25, 0.5, 0.75, 0.9)),
+  safi = mean(surv.time$safi,rm.na = T), 
+  sofa = mean(surv.time$sofa,rm.na = T), 
+  age = mean(surv.time$age,rm.na = T),
+  height = mean(surv.time$height,rm.na = T), 
+  tidalvolume = mean(surv.time$tidalvolume, rm.na = T)
+), data = surv.time))
+
+library(survminer)
+# Create survival plot visualizations
+surv_plots <-
+  surv_curve_list %>%
+  map(~survminer::surv_summary(x = .x, data = surv.time)%>% 
+        survminer::ggsurvplot_df(ylim = c(0, 1),conf.int = F) + 
+        scale_fill_viridis_d()+ 
+        scale_color_viridis_d())
+
+
+
+# Test proportional hazards assumption
+zph_list <- coxph_model_list[] %>%
+  map(~cox.zph(.x))
+
+# Calculate Schoenfeld residuals for diagnostics
+schoen_list <- coxph_model_list[] %>%
+  map(~residuals(.x,, type="scaledsch"))
+
+# Define readable labels for plot legends
+label_names <- 
+  c("age" = "Age", 
+    "height" = "Height", 
+    "raceBLACK" = "Race: Black vs. White",
+    "raceOTHER" = "Race: Other vs. White", 
+    "safi" = "SF Ratio", 
+    "sexFemale" = "Sex: Female vs. Male", 
+    "sofa" = "SOFA score", 
+    "tidalvolume" = "Tidal volume", 
+    "pfvc" = "PFVC", 
+    "pbwpfvc" = "PBW/PFVC", 
+    "raceBLACK:sexFemale" = "Black x Female", 
+    "raceBLACK:sexFemale:age" = "Black x Female x Age", 
+        "raceBLACK:age" = "Black x Age", 
+    "raceOTHER:sexFemale" = "Other race x Female", 
+    "raceOTHER:sexFemale:age" = "Other race x Female x Age",
+    "raceOTHER:age" = "Other race x Age"
+    )
+
+# Create diagnostic plots for proportional hazards assumption
+residual_plots <- map2(
+  zph_list, 
+  schoen_list, 
+  ~bind_cols(.x$time, .y) %>%
+    dplyr::rename(time = 1) %>%
+    pivot_longer(cols = !matches("time")) %>%
+    ggplot(aes(time, value)) + 
+    facet_wrap(~name, scales = "free_y", nrow = 6, labeller = labeller(name = label_names) ) + 
+    geom_point(size = 0.1, alpha = 0.5) + 
+    geom_smooth() + 
+    stat_cor(label.x.npc = "left",digits = 2, label.y.npc = "top", color = "blue") + 
+    labs(y = "Scaled Schoenfeld residuals", x = "Time (days)") + 
+    theme_bw() + 
+    theme(text = element_text(size = 15))
+)
+```
+
+# Stratified plot
+
+```{r}
+
+censor_day <- 60
+
+strata_names <- levels(surv.time$strata_var)
+
+#Survival analysis for subjects stratified by PBWPFVC tercile
+strata_coxph_fit1 <- coxph(Surv(survdays, surv01) ~ vtpbw + age + sex + race + safi + sofa, data = surv.time %>% filter(strata_var == strata_names[1])) 
+strata_coxph_fit2 <- coxph(Surv(survdays, surv01) ~ vtpbw + age + sex + race + safi + sofa, data = surv.time %>% filter(strata_var == strata_names[2])) 
+strata_coxph_fit3 <- coxph(Surv(survdays, surv01) ~ vtpbw + age + sex + race + safi + sofa, data = surv.time %>% filter(strata_var == strata_names[3])) 
+
+
+library(broom)
+coxph.results <- bind_rows(
+  strata_coxph_fit1 %>% survfit %>% tidy, 
+  strata_coxph_fit2%>% survfit%>%  tidy,
+  strata_coxph_fit3 %>% survfit%>% tidy,
+
+  .id = "strata"
+) %>% 
+  mutate(strata = strata_names[as.numeric(strata)])
+
+
+coxph.results$strata %>% unique
+
+PBWPFVC_levels <- c("Low: 12.9-16.2%", "Middle: 16.2-18.4%", "High: 18.4-27.8%")
+
+surv.plot <- ggplot(coxph.results, aes(x = time, y = estimate, fill = strata)) +
+  geom_step(size = 1, aes( color = strata)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.1) +
+  scale_y_continuous(limits = c(0,1)) +
+  scale_x_continuous(limits = c(0,censor_day)) +
+  labs(
+       x = "Days since intubation",  
+       y = "Probability of survival", 
+       color = "PBW/PFVC Ratio") + 
+  theme_minimal() +
+  theme(axis.text = element_text(size = 20), 
+        axis.title = element_text(size = 20), 
+        aspect.ratio =  1/2, 
+        legend.text = element_text(size = 12), 
+        legend.title = element_text(size = 15),
+        panel.border = element_rect(fill = NA, linewidth = 2)) + 
+  scale_color_manual(values = c("green", "blue", "red"),labels =PBWPFVC_levels) + 
+  scale_fill_manual(values = c("green", "blue", "red")) + 
+  guides(fill = "none")+ 
+  annotate(x = 59, y = 0.125, geom = "text",label = "aHR = 1.30 [1.20-1.40]\np<0.001", size = 8, hjust = 1)
+
+
+n.at.risk <- coxph.results %>% 
+  mutate(time_strata = cut(time, breaks = c(-1, 20, 40, 59.9))) %>%
+  arrange(time) %>%
+  distinct(strata, time_strata, .keep_all = T) %>%
+  mutate(strata = case_when(
+    str_detect(strata, "12.9") ~ "Low: 12.9-16.2%",
+    str_detect(strata, "27.8") ~ "High: 18.4-27.8%",
+    TRUE ~ "Middle: 16.2-18.4%"
+  ) %>%
+    factor(levels = c("Low: 12.9-16.2%", "Middle: 16.2-18.4%", "High: 18.4-27.8%") %>% rev)) %>%
+ ggplot(aes(y = strata, x = time, label = n.risk)) + 
+  geom_text(size = 5) +
+  labs(x = "Number at risk") +
+  theme_classic() + 
+  theme(
+    axis.line = element_blank(), 
+    axis.text.x = element_blank(), 
+    axis.text.y = element_text(size = 12),
+    axis.ticks = element_blank(),
+    axis.title.x = element_text(size =14),
+    axis.title.y = element_blank(),
+    aspect.ratio = 1/6
+    ) 
+
+surv.plot <- surv.plot/n.at.risk
+
+surv.plot
+pdf("figures/survival.curve.pdf", width = 10, height =8)
+surv.plot/n.at.risk
+dev.off()
+
+
+```
+
+
+# Generate and Save Survival Analysis Figures
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+
+# Save survival curve plot to PDF
+pdf(file = "LRM - R1 - Figures/Figure 3 - PBWPFVC survival curve.pdf", height = 7, width = 10)
+surv_plots[[1]] + labs(x = "Days since intubation", y = "Survival", color = "PBW/PFVC\npercentile", fill = "PBW/PFVC\npercentile") +
+  theme(axis.title.x = element_text(size = 30),axis.title.y = element_text(size = 30),
+        axis.text.x = element_text(size = 24),axis.text.y = element_text(size = 24),
+        legend.title = element_text(size = 22),legend.text = element_text(size = 30), aspect.ratio = 1/2) + labs(color = "PBW/PFVC\npercentile")
+dev.off()
+
+# Save Schoenfeld residual plots to PDF
+pdf(file = "LRM - R1 - Figures/Schoenfeld residuals.pdf", height = 10, width = 7.5)
+residual_plots
+dev.off()
+
+# Display summary of Cox proportional hazards models
+modelsummary(coxph_model_list, stars = T)
+```
+
+# Model Selection for Results Presentation
+
+```{r}
+# Identify specific model subsets by name pattern for focused analysis
+volume_models <- names(mort_formula_list) %>%
+  str_detect("interaction|unadj|BMI|PEEP|Static", negate = T) %>% which
+volume_int_models <- names(mort_formula_list) %>%
+  str_detect("^(?!Static).*interaction$") %>% which
+volume_peep_models <- names(mort_formula_list) %>%
+  str_detect("^(?!Static)(?!.*interaction).*PEEP$")%>% which
+volume_int_peep_models <- names(mort_formula_list) %>%
+  str_detect("^(?!Static)(?=.*interaction).*PEEP$")%>% which
+volume_bmi_models <- names(mort_formula_list) %>%
+  str_detect("^(?!Static)(?!.*interaction).*BMI$")%>% which
+volume_int_bmi_models <- names(mort_formula_list) %>%
+  str_detect("^(?!Static)(?=.*interaction).*BMI$")%>% which
+volume_unadjusted_models <- names(mort_formula_list) %>%
+  str_detect("^(?!Static).*unadjusted")%>% which
+
+# Print model names for reference
+# names(miiv_dp_models)
+# names(miiv_mort_models)
+
+# Identify driving pressure model subsets
+volume_dp_unadjusted_models <- names(mort_formula_list) %>%
+  str_detect("^(?=Static).*unadjusted")%>% which
+volume_dp_models <- c(
+    names(mort_formula_list) %>%
+  str_detect("^Static DP$") %>% which,
+  names(mort_formula_list) %>%
+  str_detect("^Static DP (?!.*PEEP$)(?!.*inter)(?!.*unad)") %>% which
+)
+volume_dp_int_models <- names(mort_formula_list) %>%
+  str_detect("^(?=Static).*interaction$") %>% which
+```
+
+# Organize Models for Output and Comparison
+
+```{r}
+# Create a structured list of model groups for reporting results
+model_output_list <- 
+  list(
+    "MIMIC-IV - Mortality - unadjusted" = 
+      miiv_mort_models[volume_unadjusted_models],
+    "MIMIC-IV - Mortality" = 
+      miiv_mort_models[volume_models],
+    "MIMIC-IV - Mortality - age x sex x race interaction" = 
+      miiv_mort_models[volume_int_models],
+    "MIMIC-IV - Static driving pressure - unadjusted" = 
+      miiv_dp_models[volume_unadjusted_models],
+    "MIMIC-IV - Static driving pressure" = 
+      miiv_dp_models[volume_models], 
+    "MIMIC-IV - Static driving pressure - age x sex x race interaction" =
+      miiv_dp_models[volume_int_models],
+    "MIMIC-IV - Mortality vs. static DP - unadjusted" = 
+      miiv_mort_models[volume_dp_unadjusted_models],
+    "MIMIC-IV - Mortality vs. static DP" = 
+      miiv_mort_models[volume_dp_models],
+    "MIMIC-IV - Mortality vs. static DP - age x sex x race interaction" = 
+      miiv_mort_models[volume_dp_int_models],
+    "MIMIC-IV - Survival model" = 
+      coxph_model_list, 
+    "eICU - Mortality - unadjusted" = 
+      eicu_mort_models[volume_unadjusted_models],
+    "eICU - Mortality" = 
+      eicu_mort_models[volume_models],
+    "eICU - Mortality - age x sex x race interaction" = 
+      eicu_mort_models[volume_int_models],
+    "eICU - Static driving pressure - unadjusted" = 
+      eicu_dp_models[volume_unadjusted_models],
+    "eICU - Static driving pressure" = 
+      eicu_dp_models[volume_models], 
+    "eICU - Static driving pressure - age x sex x race interaction" =
+      eicu_dp_models[volume_int_models],
+    "eICU - Mortality vs. static DP - unadjusted" = 
+      eicu_mort_models[volume_dp_unadjusted_models],
+    "eICU - Mortality vs. static DP" = 
+      eicu_mort_models[volume_dp_models],
+    "eICU - Mortality vs. static DP - age x sex x race interaction" = 
+      eicu_mort_models[volume_dp_int_models]
+  )
+  
+# Function to clean model names for better readability
+clean_names <- function(name) {
+  name %>%
+    str_remove("^DP ") %>%
+    str_remove("^Crs ") %>%
+    str_remove(" - interaction") %>%
+    str_remove("\\+ PEEP") %>%
+    str_remove("unadjusted") %>%
+    str_remove("-") %>%
+    str_remove("Static DP \\+ ") %>%
+    str_trim() # Remove any extra whitespace that might remain
+}
+
+# Apply name cleaning to model lists
+model_output_list <- model_output_list %>%
+  map(~.x %>%  
+  set_names(names(.) %>% map_chr(clean_names))
+  ) 
+```
+
+# AIC-based Model Comparison Function
+
+```{r}
+# Function to create and visualize evidence ratios for model comparison
+evidence_ratio_plot <- function(model_list, label_size = 6){
+  # Calculate AIC table for model comparison
+  aic_table <- aictab(model_list, second.ord = F) 
+  
+  # Create all pairwise model comparisons
+  model_indices <- expand_grid(
+    mod1 = names(model_list), 
+    mod2 = names(model_list)
+  ) %>% split(f = rownames(.))
+  
+  # Calculate evidence ratios for each model comparison
+  model_indices %>% 
+  map(~evidence(aic_table, model.low = .x$mod1, model.high = .x$mod2)) %>% 
+  rbindlist %>%
+  arrange(-Ev.ratio) %>%
+  # Format evidence ratio values for display
+  mutate(Ev.ratio_label = case_when(
+    Ev.ratio > 100 ~ ">100", 
+    Ev.ratio < 0.01 ~ "<0.01", 
+    Model.high == Model.low ~ "-",
+    Ev.ratio == 1 ~ "-",
+    Ev.ratio < 1 ~ round(Ev.ratio, 2) %>% as.character(),
+    Ev.ratio < 10 ~ round(Ev.ratio, 1) %>% as.character(), 
+    Ev.ratio < 100 ~ round(Ev.ratio, 0) %>% as.character(),
+    is.nan(Ev.ratio) ~ "<0.01", 
+    TRUE ~ round(Ev.ratio, 0) %>% as.character()
+  )) %>% 
+    # Cap extreme values for plotting
+    mutate(Ev.ratio = 
+             case_when(Model.high == Model.low ~ 1, 
+                       Ev.ratio > 100 ~ 100, 
+                       Ev.ratio < 0.0001 ~ 0.0001, 
+                       TRUE ~Ev.ratio) )-> evidence_ratio_matrix
+
+  # Create heatmap to visualize evidence ratios
+  evidence_ratio_matrix %>%
+    ggplot(aes(reorder(Model.low, -Ev.ratio), reorder(Model.high, Ev.ratio),
+             fill = log(Ev.ratio,10), label = Ev.ratio_label)) +
+   geom_tile() + 
+  geom_text(size = label_size, aes(color = as.factor(str_detect(Ev.ratio_label, "<|>")))) + 
+  scale_fill_gradient2(limits = c(-2, 2), oob = scales::squish) + 
+  scale_color_manual(values = c("black", "white")) + 
+  guides(color = "none", fill = "none") + 
+  labs(x = "", y = "") + 
+  theme_minimal()  + theme(aspect.ratio = 1, axis.text.x = element_text(angle = 90)) -> p1
+
+  return(p1)
+}
+```
+
+# Function to Print Figures to Word Document
+
+```{r}
+#' Print a list of figures to a Word document
+#' 
+#' @param figure_list A named list of ggplot objects
+#' @param output_file Path for the output Word document
+#' @param width Figure width in inches
+#' @param height Figure height in inches
+#' @param dpi Resolution of the figures
+#' @param style_name Word style to use for figure names
+#' @param add_page_breaks Whether to add page breaks between figures
+#' 
+#' @return Invisibly returns TRUE if successful
+#' 
+print_figures_to_word <- function(figure_list, 
+                                output_file = "figures.docx",
+                                width = 6,
+                                height = 4,
+                                dpi = 300,
+                                add_page_breaks = TRUE) {
+  
+  # Input validation
+  if (!is.list(figure_list) || is.null(names(figure_list))) {
+    stop("Input must be a named list")
+  }
+  
+  if (!all(sapply(figure_list, function(x) inherits(x, "ggplot")))) {
+    stop("All list elements must be ggplot objects")
+  }
+  
+  # Create temp directory for figures
+  temp_dir <- file.path(tempdir(), "word_figures")
+  dir.create(temp_dir, showWarnings = FALSE)
+  
+  # Create new Word document
+  doc <- read_docx()
+  
+  # Process each figure
+  for (i in seq_along(figure_list)) {
+    figure_name <- names(figure_list)[i]
+    plot <- figure_list[[i]]
+    
+    # Add page break if needed (except for first figure)
+    if (add_page_breaks && i > 1) {
+      doc <- body_add_break(doc, pos = "after")
+    }
+    
+    # Add figure name as heading 2
+    doc <- body_add_par(doc, figure_name, style = "heading 2")
+    
+    # Save plot to temp file
+    temp_file <- file.path(temp_dir, paste0("plot_", i, ".png"))
+    ggsave(temp_file, plot, 
+           width = width, height = height, 
+           units = "in", dpi = dpi)
+    
+    # Add the plot to document
+    doc <- body_add_img(doc,
+                       src = temp_file,
+                       width = width,
+                       height = height)
+  }
+  
+  # Save the document
+  print(doc, target = output_file)
+  
+  # Clean up temp files
+  unlink(temp_dir, recursive = TRUE)
+  
+  invisible(TRUE)
+}
+
+# Create evidence ratio plots for non-unadjusted models
+er_plot_list <- model_output_list[which(!str_detect(names(model_output_list), "unadjusted"))]
+
+er_model_names <- names(er_plot_list)
+er_plot_list <-  map2(er_plot_list, er_model_names, ~evidence_ratio_plot(.x,label_size =3.5) + labs(title = .y))
+
+# Save evidence ratio plots to Word document
+print_figures_to_word(er_plot_list, output_file = "ER plots.docx", width = 7, height = 7)
+```
+
+# Create and Save Regression Tables
+
+```{r}
+# Function to create formatted regression tables in Word format
+create_regression_tables <- function(model_list, 
+                                   output_file = "regression_tables.docx",
+                                   term_labels = NULL,
+                                   digits = 3,
+                                   transform_fn = NULL) {
+  
+  # Create new Word document
+  doc <- read_docx()
+  
+  # Set document properties and section formatting
+  doc <- set_doc_properties(doc,
+    title = "Regression Tables",
+    creator = "R"
+  )
+  
+  # Create section properties with landscape orientation and margins
+  sect_prop <- prop_section(
+    page_size = page_size(orient = "landscape", width = 11, height = 8.5),
+    page_margins = page_mar(
+      bottom = 0.5, top = 0.5,
+      right = 0.5, left = 0.5,
+      header = 0.5, footer = 0.5,
+      gutter = 0
+    )
+  )
+  
+  # Set default section properties for entire document
+  doc <- body_set_default_section(doc, sect_prop)
+  
+  # Function to format interaction terms
+  format_interaction_term <- function(term, term_labels) {
+    if (grepl(":", term)) {
+      # Split the interaction term
+      parts <- strsplit(term, ":")[[1]]
+      
+      # Format each part
+      formatted_parts <- sapply(parts, function(part) {
+        if (part %in% names(term_labels)) {
+          term_labels[part]
+        } else {
+          part
+        }
+      })
+      
+      # Join with "×" (multiplication symbol)
+      paste(formatted_parts, collapse = " ×\n")
+    } else {
+      if (term %in% names(term_labels)) {
+        term_labels[term]
+      } else {
+        term
+      }
+    }
+  }
+  
+  # Function to add significance stars
+  add_stars <- function(p_value) {
+    if (is.na(p_value)) return("")
+    if (p_value < 0.001) return("***")
+    if (p_value < 0.01) return("**")
+    if (p_value < 0.05) return("*")
+    return("")
+  }
+  
+  # Function to format estimate and SE
+  format_est_se <- function(estimate, se, digits, stars) {
+    estimate_rounded <- round(estimate, digits)
+    se_rounded <- round(se, digits)
+    paste0(
+      format(estimate_rounded, digits = digits, nsmall = digits),
+      stars,
+      "\n(",
+      format(se_rounded, digits = digits, nsmall = digits),
+      ")"
+    )
+  }
+  
+  # Process each main entry in the model list
+  for (model_group_name in names(model_list)) {
+    model_sublist <- model_list[[model_group_name]]
+
+    
+    # Get all unique terms across models
+    all_terms <- unique(unlist(lapply(model_sublist, function(model) {
+      tidy(model)$term
+    })))
+    
+    # Create a data frame to store all results
+    results_list <- lapply(names(model_sublist), function(model_name) {
+      model <- model_sublist[[model_name]]
+      
+      # Get model results
+      model_results <- tidy(model)
+      
+      # Apply transformation if specified
+      if (!is.null(transform_fn)) {
+        if ("estimate" %in% names(model_results)) {
+          model_results$estimate <- transform_fn(model_results$estimate)
+        }
+        if ("std.error" %in% names(model_results)) {
+          model_results$std.error <- transform_fn(model_results$std.error)
+        }
+      }
+      
+      # Add significance stars
+      model_results$stars <- sapply(model_results$p.value, add_stars)
+      
+      # Format estimate and SE together
+      model_results$formatted_result <- mapply(
+        format_est_se,
+        model_results$estimate,
+        model_results$std.error,
+        MoreArgs = list(digits = digits),
+        model_results$stars
+      )
+      
+      # Create a named vector of results
+      results_vector <- model_results$formatted_result
+      names(results_vector) <- model_results$term
+      
+      # Create a complete vector with all terms
+      complete_results <- rep(NA_character_, length(all_terms))
+      names(complete_results) <- all_terms
+      complete_results[names(results_vector)] <- results_vector
+      
+      complete_results
+    })
+    
+    # Combine results into a data frame
+    results_df <- data.frame(
+      term = all_terms,
+      stringsAsFactors = FALSE
+    )
+    
+    for (i in seq_along(results_list)) {
+      results_df[[names(model_sublist)[i]]] <- results_list[[i]]
+    }
+    
+    # Format term labels including interactions
+    if (!is.null(term_labels)) {
+      results_df$term <- sapply(
+        results_df$term,
+        format_interaction_term,
+        term_labels = term_labels
+      )
+    }
+    
+    # Add model statistics (N and AIC) at the bottom
+    n_obs <- sapply(model_sublist, function(model) {
+      if ("nobs" %in% names(model)) {
+        return(model$nobs)
+      } else {
+        return(nrow(model.frame(model)))
+      }
+    })
+    
+    aic_values <- sapply(model_sublist, function(model) {
+      tryCatch({
+        round(AIC(model), 0)
+      }, error = function(e) {
+        return(NA)
+      })
+    })
+    
+    # Add rows for N and AIC
+    n_row <- c("N", sapply(n_obs, function(n) format(n, big.mark = ",")))
+    aic_row <- c("AIC", sapply(aic_values, function(aic) {
+      if (is.na(aic)) return("—")
+      format(aic, digits = digits, nsmall = 0)
+    }))
+    
+    # Add blank row before model statistics
+    blank_row <- rep("", ncol(results_df))
+    names(blank_row) <- names(results_df)
+    
+    # Bind the new rows
+    results_df <- rbind(
+      results_df,
+      blank_row,
+      n_row,
+      aic_row
+    )
+    
+    # Create flextable with full width setting
+    ft <- flextable(results_df, 
+                   cwidth = 1) %>%
+      theme_vanilla() 
+    
+    # Set header labels
+    header_labels <- list(term = "Term")
+    header_labels[names(model_sublist)] <- names(model_sublist)
+    ft <- set_header_labels(ft, values = header_labels)
+    
+    # Format the table
+    ft <- ft %>%
+      align(part = "header", align = "center") %>%
+      align(j = -1, align = "center") %>%  # Center all columns except term
+      align(j = 1, align = "left") %>%     # Left align term column
+      fontsize(size = 10) %>%
+      fontsize(size = 8, part = "header") %>%
+      fontsize(j = 1, size = 9) %>%
+      padding(padding = 3) %>%
+      autofit() 
+    
+    # Add border above model statistics
+    ft <- ft %>%
+      hline(
+        i = nrow(results_df) - 3,  # Position before the blank row
+        border = fp_border(color = "black", width = 1)
+      )
+    
+    # Add to document
+    doc <- doc %>%
+      body_add_par(model_group_name, style = "heading 2") %>%
+      body_add_flextable(ft) %>%
+      body_add_par("* p < 0.05, ** p < 0.01, *** p < 0.001", style = "Normal") %>%
+      body_add_break()
+  }
+  
+  # Add legend at the end
+  doc <- doc %>%
+    body_add_par("Note: Coefficients are shown with standard errors in parentheses.", 
+                 style = "Normal")
+  
+  # Save document
+  print(doc, target = output_file)
+}
+```
+
+# Generate Regression Tables
+
+```{r}
+# Create regression tables with defined coefficient labels
+create_regression_tables(model_output_list, term_labels = coef_labels)
+```
+
+
+
+# Pulmonary Compliance and Driving Pressure Analysis
+
+
+
+# Demographic-Specific Mortality and Respiratory Mechanics Prediction
+
+```{r}
+# Predict mortality by demographic factors, adjusting for clinical severity
+mortality_plot <- miiv.included %>%
+  lm(data = . , mortality ~ age * sex * race + safi + sofa + tidalvolume)  %>%
+  predictions(newdata = datagrid(
+    race = c("BLACK", "WHITE", "OTHER"), 
+    sex = c("Male", "Female")
+  )) %>% 
+  ggplot(aes(reorder(paste(race, sex, sep = "\n"), estimate) , estimate)) + 
+  geom_point() + geom_segment(aes(y = conf.low, yend = conf.high)) +
+  labs(x = "", y = "Mortality rate") + 
+  theme_bw()+
+  theme(aspect.ratio = 1) 
+
+# Predict static driving pressure by demographic factors
+static_dp_plot <- miiv.included %>%
+  lm(data = . , static_dp ~ age * sex * race + safi + sofa + tidalvolume)  %>%
+  predictions(newdata = datagrid(
+    race = c("BLACK", "WHITE", "OTHER"), 
+    sex = c("Male", "Female")
+  )) %>% 
+  ggplot(aes(reorder(paste(race, sex, sep = "\n"), estimate) , estimate)) + 
+  geom_point() + geom_segment(aes(y = conf.low, yend = conf.high)) +
+  labs(x = "", y = "Static driving pressure") + 
+  theme_bw()+
+  theme(aspect.ratio = 1) 
+
+# Predict dynamic driving pressure by demographic factors
+dynamic_dp_plot <- miiv.included %>%
+  lm(data = . , dynamic_dp ~ age * sex * race + safi + sofa + tidalvolume)  %>%
+  predictions(newdata = datagrid(
+    race = c("BLACK", "WHITE", "OTHER"), 
+    sex = c("Male", "Female")
+  )) %>% 
+  ggplot(aes(reorder(paste(race, sex, sep = "\n"), estimate) , estimate)) + 
+  geom_point() + geom_segment(aes(y = conf.low, yend = conf.high)) +
+  labs(x = "", y = "Dynamic driving pressure") + 
+  theme_bw()+
+  theme(aspect.ratio = 1) 
+
+# Predict respiratory compliance by demographic factors
+compliance_plot <- miiv.included %>%
+  lm(data = . , crs ~ age * sex * race + safi + sofa)  %>%
+  predictions(newdata = datagrid(
+    race = c("BLACK", "WHITE", "OTHER"), 
+    sex = c("Male", "Female")
+  )) %>% 
+  ggplot(aes(reorder(paste(race, sex, sep = "\n"), -estimate) , estimate)) + 
+  geom_point() + geom_segment(aes(y = conf.low, yend = conf.high)) +
+  labs(x = "", y = "Compliance") + 
+  theme_bw()+
+  theme(aspect.ratio = 1) 
+
+# Predict respiratory elastance by demographic factors
+elastance_plot <- miiv.included %>%
+  lm(data = . , ers ~ age * sex * race + safi + sofa)  %>%
+  predictions(newdata = datagrid(
+    race = c("BLACK", "WHITE", "OTHER"), 
+    sex = c("Male", "Female")
+  )) %>% 
+  ggplot(aes(reorder(paste(race, sex, sep = "\n"), estimate) , estimate)) + 
+  geom_point() + geom_segment(aes(y = conf.low, yend = conf.high)) +
+  labs(x = "", y = "Elastance") + 
+  theme_bw()+
+  theme(aspect.ratio = 1) 
+
+# Display all plots
+mortality_plot
+static_dp_plot
+dynamic_dp_plot
+compliance_plot
+elastance_plot
+```
+
+# Algorithmic Bias Analysis Function
+
+```{r}
+algorithmic_bias_plot <- function(data, 
+                                  dependent_vars,      # Vector of dependent variable names
+                                  independent_vars,    # Vector of independent variable names
+                                  grouping_vars,       # Vector of variables used for stratification
+                                  color_palettes = NULL, # List of named vectors containing colors for each stratification variable
+                                  x_size = 0.5,       # Size of points in the plot
+                                  n_tiles = 10,       # Number of tiles for aggregation
+                                  conf_level = 0.95,  # Confidence level for intervals
+                                  y_limits = NULL,    # Optional list of y-axis limits for each dependent variable
+                                  min_n = NULL,       # Minimum number of observations required for plotting
+                                  dep_var_labels = NULL,     # Vector of labels for dependent variables
+                                  strat_var_labels = NULL,   # Vector of labels for stratification variables
+                                  x_labels = NULL,           # Vector of x-axis labels
+                                  title_size = 11,          # Size for axis titles and legend titles
+                                  axis_text_size = 10,      # Size for axis text
+                                  legend_text_size = 10) {  # Size for legend text
+  
+  # Input validation
+  if (!is.null(x_labels) && length(x_labels) != length(independent_vars)) {
+    stop("Length of x_labels must match number of independent variables")
+  }
+  if (!is.null(dep_var_labels) && length(dep_var_labels) != length(dependent_vars)) {
+    stop("Length of dep_var_labels must match number of dependent variables")
+  }
+  if (!is.null(strat_var_labels) && length(strat_var_labels) != length(grouping_vars)) {
+    stop("Length of strat_var_labels must match number of grouping variables")
+  }
+  
+  # Define theme for consistent text sizes across plots
+  size_theme <- theme(
+    axis.title = element_text(size = title_size),
+    axis.text = element_text(size = axis_text_size),
+    legend.title = element_text(size = title_size),
+    legend.text = element_text(size = legend_text_size)
+  )
+  
+  # Okabe-Ito color palette (colorblind-friendly default)
+  okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
+  
+  # Validate color palettes if provided
+  if (!is.null(color_palettes)) {
+    if (length(color_palettes) != length(grouping_vars)) {
+      stop("Length of color_palettes must match number of grouping variables")
+    }
+    
+    # For each stratification variable, check if provided palette matches levels
+    for (g in seq_along(grouping_vars)) {
+      if (!is.null(color_palettes[[g]])) {
+        # Get unique levels for this stratification variable
+        if (is.numeric(data[[grouping_vars[g]]])) {
+          expected_levels <- c("Tercile 1", "Tercile 2", "Tercile 3")
+        } else {
+          expected_levels <- levels(factor(data[[grouping_vars[g]]]))
+        }
+        
+        # Check if palette has correct names and length
+        if (length(color_palettes[[g]]) != length(expected_levels) ||
+            !all(names(color_palettes[[g]]) %in% expected_levels)) {
+          stop(sprintf("Color palette for stratification variable %s must be a named vector with names matching levels: %s",
+                       grouping_vars[g], paste(expected_levels, collapse = ", ")))
+        }
+      }
+    }
+  }
+  
+  # Helper function to calculate confidence intervals
+  calc_ci <- function(x, binary = FALSE) {
+    if(binary) {
+      n <- length(x)
+      p <- mean(x, na.rm = TRUE)
+      z <- qnorm((1 + conf_level) / 2)
+      
+      center <- (p + z^2/(2*n)) / (1 + z^2/n)
+      spread <- z * sqrt((p*(1-p) + z^2/(4*n)) / n) / (1 + z^2/n)
+      
+      return(list(
+        lower = center - spread,
+        upper = center + spread
+      ))
+    } else {
+      n <- length(x)
+      se <- sd(x, na.rm = TRUE) / sqrt(n)
+      t_val <- qt((1 + conf_level) / 2, df = n - 1)
+      
+      return(list(
+        lower = mean(x, na.rm = TRUE) - t_val * se,
+        upper = mean(x, na.rm = TRUE) + t_val * se
+      ))
+    }
+  }
+  
+  # Initialize list to store all plots
+  all_strat_plots <- list()
+  
+  # Process each stratification variable
+  for(g in seq_along(grouping_vars)) {
+    grouping_var <- grouping_vars[g]
+    group_label <- if(!is.null(strat_var_labels)) strat_var_labels[g] else grouping_var
+    
+    # Create group factor for current stratification variable
+    if(is.numeric(data[[grouping_var]])) {
+      data$group_factor <- cut(data[[grouping_var]], 
+                               breaks = quantile(data[[grouping_var]], probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+                               labels = c("Tercile 1", "Tercile 2", "Tercile 3"),
+                               include.lowest = TRUE)
+    } else {
+      data$group_factor <- factor(data[[grouping_var]])
+    }
+    
+    # Get color scale for this stratification variable
+    if (!is.null(color_palettes) && !is.null(color_palettes[[g]])) {
+      color_scale <- scale_color_manual(
+        name = group_label,
+        values = color_palettes[[g]],
+        limits = names(color_palettes[[g]])
+      )
+    } else {
+      # Use Okabe-Ito palette with enough colors for the levels
+      n_levels <- length(levels(data$group_factor))
+      color_scale <- scale_color_manual(
+        name = group_label,
+        values = okabe_ito[1:n_levels],
+        limits = levels(data$group_factor)
+      )
+    }
+    
+    # Initialize lists for summaries
+    all_perc_summaries <- list()
+    all_ntile_summaries <- list()
+    all_y_ranges <- list()
+    
+    # Process each dependent variable
+    for(d in seq_along(dependent_vars)) {
+      dep_var <- dependent_vars[d]
+      
+      # Initialize lists for this dependent variable
+      perc_summaries <- list()
+      ntile_summaries <- list()
+      
+      # Process each independent variable
+      for(i in seq_along(independent_vars)) {
+        var_name <- independent_vars[i]
+        
+        # Create percentile and ntile versions
+        if(!exists(paste0("perc_var", i), data)) {
+          data[[paste0("perc_var", i)]] <- ntile(data[[var_name]], 100)
+          data[[paste0("ntile_var", i)]] <- ntile(data[[var_name]], n_tiles)
+        }
+        
+        # Calculate percentile summaries
+        perc_summaries[[i]] <- data %>%
+          filter(!is.na(!!sym(dep_var))) %>%
+          group_by(group_factor, !!sym(paste0("perc_var", i))) %>%
+          summarise(avg_dep = mean(!!sym(dep_var), na.rm = TRUE), .groups = "drop") %>%
+          complete(group_factor, !!sym(paste0("perc_var", i)) := 1:100, fill = list(avg_dep = NA))
+        
+        # Calculate ntile summaries with confidence intervals
+        ntile_summaries[[i]] <- data %>%
+          filter(!is.na(!!sym(dep_var))) %>%
+          group_by(group_factor, !!sym(paste0("ntile_var", i))) %>%
+          summarise(
+            n = n(),
+            avg_dep = if(is.null(min_n) || n >= min_n) mean(!!sym(dep_var), na.rm = TRUE) else NA,
+            ci = if(is.null(min_n) || n >= min_n) 
+              list(calc_ci(!!sym(dep_var), binary = all(!!sym(dep_var) %in% c(0,1)))) 
+            else list(list(lower = NA, upper = NA)),
+            .groups = "drop"
+          ) %>%
+          unnest_wider(ci) %>%
+          mutate(
+            x_pos = !!sym(paste0("ntile_var", i)) * (100/n_tiles) - (50/n_tiles)
+          )
+      }
+      
+      # Store summaries for this dependent variable
+      all_perc_summaries[[d]] <- perc_summaries
+      all_ntile_summaries[[d]] <- ntile_summaries
+      
+      # Calculate y-axis limits for this dependent variable
+      if (is.null(y_limits) || is.null(y_limits[[d]])) {
+        y_values <- c(
+          sapply(perc_summaries, function(x) x$avg_dep),
+          sapply(ntile_summaries, function(x) c(x$lower, x$upper))
+        )
+        y_values <- unlist(y_values)
+        y_range <- range(y_values, na.rm = TRUE)
+        y_sd <- sd(y_values, na.rm = TRUE)
+        y_mean <- mean(y_values, na.rm = TRUE)
+        all_y_ranges[[d]] <- c(
+          max(y_mean-(3 * y_sd), min(y_range)) * 0.95, 
+          min(y_mean+(3 * y_sd), max(y_range)) * 1.05
+        )
+      } else {
+        all_y_ranges[[d]] <- y_limits[[d]]
+      }
+    }
+    
+    # Plot generation parameters
+    dodge_width <- 5
+    point_size <- 2
+    
+    # Function to create plot for each dependent variable
+    create_dep_var_panel <- function(d, i, show_y_axis = TRUE) {
+      dep_var <- dependent_vars[d]
+      y_range <- all_y_ranges[[d]]
+      
+      p <- ggplot() +
+        # Plot percentile data with alpha transparency
+        geom_point(data = all_perc_summaries[[d]][[i]],
+                   aes(x = !!sym(paste0("perc_var", i)), 
+                       y = squish(avg_dep, y_range),
+                       color = group_factor, 
+                       shape = case_when(
+                         squish(avg_dep, y_range) > avg_dep ~ "OOBUp", 
+                         squish(avg_dep, y_range) < avg_dep ~ "OOBDown", 
+                         TRUE ~ "x"
+                       )),
+                   size = x_size, alpha = 0.5) +
+        # Plot summarized ntile data points
+        geom_point(data = all_ntile_summaries[[d]][[i]],
+                   aes(x = x_pos, y = avg_dep, color = group_factor),
+                   position = position_dodge(width = dodge_width)) +
+        # Add confidence interval error bars
+        geom_errorbar(data = all_ntile_summaries[[d]][[i]],
+                      aes(x = x_pos, ymin = lower, ymax = upper,
+                          color = group_factor),
+                      position = position_dodge(width = dodge_width),
+                      width = 2) +
+        # Add smoothed trend line
+        geom_smooth(data = filter(data, !is.na(!!sym(dep_var))),
+                    aes(x = !!sym(paste0("perc_var", i)), 
+                        y = !!sym(dep_var), color = group_factor),
+                    method = "loess", se = FALSE, size = 0.5) +
+        # Set plot limits
+        coord_cartesian(xlim = c(0,100), ylim = y_range) + 
+        color_scale +
+        # Define point shapes for out-of-bounds values
+        scale_shape_manual(values = c("OOBUp" = 6, "x" = 4, "OOBDown" = 2)) + 
+        guides(shape = "none") + 
+        # Set axis labels
+        labs(x = NULL,
+             y = if(show_y_axis) 
+               if(!is.null(dep_var_labels)) dep_var_labels[d] else dep_var 
+             else NULL) +
+        theme_minimal() +
+        size_theme
+      
+      # Remove y-axis elements if not the first column
+      if (!show_y_axis) {
+        p <- p + theme(axis.text.y = element_blank(),
+                       axis.ticks.y = element_blank())
+      }
+      return(p)
+    }
+    
+    # Function to create bottom panel plot (bee swarm distribution)
+    create_bottom_panel <- function(i, show_y_axis = TRUE) {
+      p <- ggplot(data, aes(x = !!sym(paste0("perc_var", i)), y = group_factor)) +
+        # Create beeswarm/quasi-random distribution of points
+        geom_quasirandom(aes(color = group_factor), size = 0.1, alpha = 0.5) +
+        scale_x_continuous(limits = c(0, 100)) +
+        color_scale +
+        # Set axis labels
+        labs(x = if(is.null(x_labels)) paste("Percentile of", independent_vars[i]) else x_labels[i],
+             y = if(show_y_axis) group_label else NULL) +
+        theme_minimal() +
+        theme(legend.position = "none") +
+        guides(color = "none") + 
+        size_theme
+      
+      # Remove y-axis elements if not the first column
+      if (!show_y_axis) {
+        p <- p + theme(axis.text.y = element_blank(),
+                       axis.ticks.y = element_blank())
+      }
+      return(p)
+    }
+    
+    # Create plots for this stratification variable
+    strat_plots <- list()
+    
+    # Create plots for each dependent variable
+    for(d in seq_along(dependent_vars)) {
+      row_plots <- list()
+      for(i in seq_along(independent_vars)) {
+        row_plots[[i]] <- create_dep_var_panel(d, i, show_y_axis = (i == 1))
+      }
+      strat_plots[[d]] <- Reduce(`+`, row_plots)
+    }
+    
+    # Create bottom row (bee swarm plots)
+    bottom_plots <- list()
+    for(i in seq_along(independent_vars)) {
+      bottom_plots[[i]] <- create_bottom_panel(i, show_y_axis = (i == 1))
+    }
+    strat_plots[[length(strat_plots) + 1]] <- Reduce(`+`, bottom_plots)
+    
+    # Combine plots for this stratification variable with proper height ratios
+    all_strat_plots[[g]] <- wrap_plots(
+      strat_plots, 
+      ncol = 1,
+      heights = c(rep(4, length(dependent_vars)), 1)
+    ) +
+      plot_layout(guides = "collect")
+  }
+  
+  # Create final combined plot with all stratification variables
+  final_plot <- wrap_plots(all_strat_plots, ncol = 1, heights = rep(1, length(grouping_vars))) +
+    plot_layout(guides = "collect")
+  
+  return(final_plot)
+}
+
+# Define colorblind-friendly palette for plots
+colorblind_palette  <- c(
+  "#000000",  # Black
+  "#E69F00",  # Orange
+  "#56B4E9",  # Light blue
+  "#009E73",  # Green
+  "#AA4499",  # Violet (replacing yellow)
+  "#0072B2",  # Dark blue
+  "#D55E00",  # Red
+  "#CC79A7",  # Pink
+  "#999999",  # Grey
+  "#44AA99",  # Teal
+  "#882255"   # Purple
+)
+
+# Assign colors to demographic groups
+sex_palette <- colorblind_palette[1:2]
+race_palette <- colorblind_palette[3:5]
+age_palette <- colorblind_palette[6:8]
+height_palette <- colorblind_palette[9:11]
+```
+
+# Figures 
+```{r}
+#Fig 1A - Weight and PFVC vs. PBW
+fig1A <- algorithmic_bias_plot(
+    miiv.included,
+    dependent_vars = c("weight", "pfvc"), dep_var_labels = c("Weight (kg)", "PFVC (L)" ),
+    independent_vars = c("pbw"),
+    x_labels = c("PBW percentile"),
+    c("sex", "race", "age"),strat_var_labels = c("Sex", "Race", "Age"),
+    color_palettes = list(sex_palette, race_palette, age_palette),
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  ) + plot_layout(ncol = 3, nrow = 1)
+
+pbwpfvc_plots <- 
+  list(theme_bw(), 
+       theme(
+         text = element_text(size = 16), 
+         aspect.ratio = 1, 
+         labs(y = "PBW/PFVC ratio", color = "")
+       ))
+fig1B.p1 <- miiv.included %>%
+  ggplot(aes(sex, pbwpfvc, color = sex)) + 
+  geom_violin(draw_quantiles = 0.5, size = 1) + 
+  stat_compare_means(comparisons  = list(c("Male", "Female")),label = "p.signif") +
+  geom_jitter(size = 0.1, width = 0.2) +
+  scale_color_manual(values = sex_palette) + 
+  pbwpfvc_plots + 
+  labs(y = "PBW/PFVC ratio", color = "Sex", x = "")
+
+fig1B.p2 <- miiv.included %>%
+  ggplot(aes(race, pbwpfvc, color = race)) + 
+  geom_violin(draw_quantiles = 0.5, size = 1) + 
+  geom_jitter(size = 0.1, width = 0.2) + 
+  stat_compare_means(comparisons  = list(c("WHITE", "OTHER"), c("BLACK", "WHITE")),label = "p.signif") + 
+  scale_color_manual(values = race_palette)+ 
+  pbwpfvc_plots+ 
+  labs(y = "PBW/PFVC ratio", color = "Race", x = "")
+
+
+fig1B.p3 <- miiv.included %>%
+  ggplot(aes(age, pbwpfvc)) + 
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2, raw = TRUE), se = TRUE) +
+  ggpmisc::stat_poly_eq(formula = y ~ poly(x, 2, raw = TRUE),
+                        aes(label = paste(after_stat(rr.label), " p < 0.001", sep = "~")),
+                        parse = TRUE) +
+  geom_point(size = 0.1, alpha= 0.3) + 
+  pbwpfvc_plots+ 
+  labs(y = "PBW/PFVC ratio", x = "Age (years)")
+
+fig1B.p4 <- miiv.included %>%
+  ggplot(aes(height, pbwpfvc)) + 
+  geom_point(size = 0.1, alpha = 0.3) + 
+  geom_smooth(method = "lm") +  
+  ggpmisc::stat_poly_eq(formula = y ~ poly(x, 1, raw = TRUE),
+                        aes(label = paste(after_stat(rr.label), " p < 0.001", sep = "~")),
+                        parse = TRUE) +
+  pbwpfvc_plots+ 
+  labs(y = "PBW/PFVC ratio", x = "Height (cm)")
+
+pdf("LRM - R1 - Figures/Figure 1 - Wt and PFVC vs PBW.pdf", height = 14, width = 14)
+(fig1A/plot_spacer()/(fig1B.p1 + fig1B.p2 + fig1B.p3 + fig1B.p4)) + plot_layout(heights = c(5,0.3,5))
+dev.off()
+
+
+pdf("LRM - R1 - Figures/Figure 2 - VTPBW and VTPFVC.pdf", height = 8, width = 12)
+# Create plots for VT/PBW and VT/PFVC by sex
+p1 <- miiv.included %>%
+  algorithmic_bias_plot(
+    c("vtpbw", "vtpfvc"), dep_var_labels = c("VT/PBW (cc/kg)", "VT/PFVC (%)"),
+    c("age", "height"), x_labels =  c("Age percentile", "Height percentile"),
+    c("sex"), strat_var_labels = c("Sex"),
+    color_palettes = list(sex_palette), 
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  )
+
+# Create plots for VT/PBW and VT/PFVC by race
+p2 <- miiv.included %>%
+  algorithmic_bias_plot(
+    c("vtpbw", "vtpfvc"), dep_var_labels = c("VT/PBW (cc/kg)", "VT/PFVC (%)"),
+    c("age", "height"), x_labels =  c("Age percentile", "Height percentile"),
+    c("race"), strat_var_labels = c("Race"),
+    color_palettes = list(race_palette), 
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  )
+
+# Combine plots side by side with shared legend
+(p1 | p2) +
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom", plot.tag = element_text(size = 20))
+dev.off()
+
+
+### Figure 3 - mortality 
+
+fig3a <- miiv.included %>%
+      algorithmic_bias_plot(
+        "mortality", dep_var_labels =  "Mortality",
+        c("pbwpfvc"), 
+        x_labels = c("PBW/PFVC percentile"),
+        c("sex", "age"),strat_var_labels = c("Sex", "Age"),
+        color_palettes = list(sex_palette, age_palette),
+        x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+      ) |
+      miiv.included %>%
+      algorithmic_bias_plot(
+        "mortality", dep_var_labels =  "Mortality",
+        c("pbwpfvc"), 
+        x_labels = c("PBW/PFVC percentile"),
+        c( "race", "height"),strat_var_labels = c("Race", "Height"),
+        color_palettes = list(race_palette, height_palette),
+        x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+      )
+
+# fig3b <-  surv_plots[[1]] + labs(x = "Days since intubation", y = "Survival", color = "PBW/PFVC\npercentile", fill = "PBW/PFVC\npercentile") +
+#   theme(axis.title.x = element_text(size = 30),axis.title.y = element_text(size = 30),
+#         axis.text.x = element_text(size = 24),axis.text.y = element_text(size = 24),
+#         legend.title = element_text(size = 22),legend.text = element_text(size = 30), aspect.ratio = 1/2) + labs(color = "PBW/PFVC\npercentile")
+
+pdf(height = 16, width = 12, file = "LRM - R1 - Figures/Figure 3 - Mortality and survival curve.pdf")
+(fig3a/plot_spacer()/surv.plot) + plot_layout(heights =c(6, 0.1, 3))
+dev.off()
+
+### Figure 4
+
+fig4 <- miiv.included %>%
+  algorithmic_bias_plot(
+    "static_dp", dep_var_labels =  "Driving pressure (cmH2O)",
+    c("pbwpfvc"), 
+    x_labels = c("PBW/PFVC percentile"),
+    c("sex", "age"),strat_var_labels = c("Sex", "Age"),
+    color_palettes = list(sex_palette, age_palette),
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  ) |
+  miiv.included %>%
+  algorithmic_bias_plot(
+    "static_dp", dep_var_labels =  "Driving pressure (cmH2O)",
+    c("pbwpfvc"), 
+    x_labels = c("PBW/PFVC percentile"),
+    c( "race", "height"),strat_var_labels = c("Race", "Height"),
+    color_palettes = list(race_palette, height_palette),
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  )
+
+pdf(height = 12, width = 12, file = "LRM - R1 - Figures/Figure 4 - driving pressure.pdf")
+(fig4) 
+dev.off()
+
+# Figure 5 - Elastance vs. age/height/sex/race
+pdf("LRM - R1 - Figures/Figure 5 - elastance.pdf" , height = 8, width = 14)
+# Plot PBW-normalized elastance by patient parameters and demographics
+fig5a <- miiv.included %>%
+  algorithmic_bias_plot(
+    c("ers_vtpbw"), dep_var_labels = c("Ers x PBW"),
+    c("age", "height"), 
+    x_labels = c("Age percentile", "Height percentile"),
+    c("sex", "race"),strat_var_labels = c("Sex", "Race"),
+    color_palettes = list(sex_palette, race_palette),
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  ) 
+
+# Plot PFVC-normalized elastance by patient parameters and demographics
+fig5b <- miiv.included %>%
+  algorithmic_bias_plot(
+    c("ers_vtpfvc"), dep_var_labels = c("Ers x PFVC"),
+    c("age", "height"), 
+    x_labels = c("Age percentile", "Height percentile"),
+    c("sex", "race"),strat_var_labels = c("Sex", "Race"),
+    color_palettes = list(sex_palette, race_palette),
+    x_size = 1,min_n = 10,n_tiles = 10,title_size = 14,axis_text_size = 12
+  ) 
+
+fig5a | fig5b
+dev.off()
+
+```
+
+# DP x age x VT/PFVC heatmaps
+```{r}
+#This section uses the marginaleffects package to estimate the average values for driving pressure and mortality by age and VT/PFVC after adjusting for covariates
+
+
+df <- miiv.included %>%
+  glm(data = ., family = binomial, 
+      mortality ~ static_dp + age*sex*race + 
+        sofa + safi + pbw + pfvc + tidalvolume) %>% 
+ avg_predictions(by = c("static_dp", "pfvc"), 
+                   newdata = datagrid(static_dp = seq(5,35,1), 
+                                      pfvc = seq(2,7,0.5))) %>% as_tibble 
+  
+
+df2 <- miiv.included %>%
+  glm(data = ., family = binomial, 
+      mortality ~ static_dp + age*sex*race + 
+        sofa + safi + vtpbw +vtpfvc) %>% 
+  avg_predictions(by = c("static_dp", "vtpfvc"), 
+                  newdata = datagrid(static_dp = seq(5,35,1), 
+                                     vtpfvc = seq(5,25,1))) %>% as_tibble 
+
+sex_race_grid <-
+  expand_grid(
+    race = c("WHITE", "BLACK", "OTHER"),
+    sex = c("Male", "Female")
+  )
+
+
+stratified_vtpbw_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glm(data = miiv.included,
+         family = binomial,
+         mortality ~ static_dp + age*sex*race +
+           sofa + safi + vtpbw) %>%  #tidy
+      avg_predictions(by = c("vtpbw", "static_dp" ),
+                      newdata = datagrid(
+                        static_dp = seq(5, 35,1),
+                        vtpbw = seq(6,8,0.1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+
+stratified_vtpbw_dp_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+      ~lm(data = miiv.included,
+         static_dp ~ age*sex*race + scale(bmi) +
+         sofa + safi + vtpbw) %>%  #tidy
+         avg_predictions(by = c("vtpbw", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        vtpbw = seq(6,8,0.1),
+                        race = .x[1],
+                        sex = .x[2]
+                    )
+    ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+)
+
+stratified_vtpfvc_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glm(data = miiv.included,
+         family = binomial,
+         mortality ~ static_dp + age*sex*race +
+           sofa + safi + vtpbw +vtpfvc) %>%  #tidy
+      avg_predictions(by = c("vtpfvc", "static_dp" ),
+                      newdata = datagrid(
+                        static_dp = seq(5, 35,1),
+                        vtpfvc = seq(6,24,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+
+stratified_vtpfvc_dp_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~lm(data = miiv.included,
+        static_dp ~ age*sex*race + scale(bmi) +
+          sofa + safi + vtpfvc) %>%  #tidy
+      avg_predictions(by = c("vtpfvc", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        vtpfvc = seq(6,24,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+stratified_vtpfvc_age_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glm(data = miiv.included,
+         family = binomial,
+         mortality ~ age*sex*race +
+           sofa + safi + vtpbw +vtpfvc) %>%  #tidy
+      avg_predictions(by = c("vtpfvc", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        vtpfvc = seq(6,24,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+stratified_dp_age_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glm(data = miiv.included,
+         family = binomial,
+         mortality ~ age*sex*race + static_dp +
+           sofa + safi + vtpbw) %>%  #tidy
+      avg_predictions(by = c("static_dp", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        static_dp = seq(5, 35,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+# 
+
+
+pdf("LRM - R1 - Figures/Figure I1 - MIMIC - Stratified DP and mortality vs VTPFVC.pdf", height = 8, width= 12)
+stratified_vtpfvc_mortality_grid %>% rbindlist() %>%
+  ggplot(aes(vtpfvc, static_dp, fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "A", limits = c(0,1)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) +
+  labs(x = "VT/PFVC (%)", y = "Driving pressure (cm H2O)", fill = "Mortality")
+
+stratified_vtpfvc_dp_grid %>% rbindlist() %>%
+  ggplot(aes(vtpfvc, age, fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "G") + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) + 
+  labs(x = "VT/PFVC (%)", y="Age", fill = "Driving\npressure\n(cm H2O)")
+
+stratified_vtpfvc_age_mortality_grid %>% rbindlist() %>%
+  ggplot(aes(vtpfvc, age, fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "A", limits = c(0,1)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) +
+  labs(x = "VT/PFVC (%)", y = "Age (years)", fill = "Mortality")
+
+stratified_dp_age_mortality_grid %>% rbindlist() %>%
+  ggplot(aes(age, static_dp ,fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "A", limits = c(0,1)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) +
+  labs(x = "Age (years)", y = "Driving pressure (cm H2O)", fill = "Mortality")
+
+dev.off()
+
+t1 <- stratified_vtpfvc_mortality_grid %>% 
+  map(~.x %>% dplyr::select(vtpfvc, static_dp,mortality =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(vtpfvc %% 5 == 0, static_dp %% 5 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(mortality = paste(round(mortality, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(vtpfvc, static_dp), names_from = group,values_from = mortality) %>%
+  flextable
+ 
+
+t2 <- stratified_vtpfvc_age_mortality_grid%>% 
+  map(~.x %>% dplyr::select(vtpfvc, age,mortality =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(vtpfvc %% 5 == 0, age %% 20 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(mortality = paste(round(mortality, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(vtpfvc, age), names_from = group,values_from = mortality)%>%
+  flextable
+
+t3 <- stratified_vtpfvc_dp_grid%>% 
+  map(~.x %>% dplyr::select(vtpfvc, age,static_dp =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(vtpfvc %% 5 == 0, age %% 20 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(static_dp = paste(round(static_dp, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(vtpfvc, age), names_from = group,values_from = static_dp)%>%
+  flextable
+
+t4 <- stratified_dp_age_mortality_grid%>% 
+  map(~.x %>% dplyr::select(static_dp, age,mortality =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(static_dp %% 5 == 0, age %% 10 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(mortality = paste(round(mortality, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(static_dp, age), names_from = group,values_from = mortality) %>%
+  flextable
+
+# Create a new Word document with the table
+doc <- read_docx()
+doc <- body_add_flextable(doc, t1)
+doc <- body_add_flextable(doc, t2)
+doc <- body_add_flextable(doc, t3)
+doc <- body_add_flextable(doc, t4)
+
+# Save the document
+print(doc, target = "MIMIC-IV - Marginal effects tables.docx")
+
+
+```
+
+```{r}
+df <- eicu.included %>%
+  glmer(data = ., family = binomial, 
+      mortality ~ (1|hospitalid) + static_dp + age*sex*race + 
+        sofa + safi + pbw + pfvc + tidalvolume) %>% 
+ avg_predictions(by = c("static_dp", "pfvc"), 
+                   newdata = datagrid(static_dp = seq(5,35,1), 
+                                      pfvc = seq(2,7,0.5))) %>% as_tibble 
+  
+
+df2 <- eicu.included %>%
+  glmer(data = ., family = binomial, 
+      mortality ~ (1|hospitalid) + static_dp + age*sex*race + 
+        sofa + safi + vtpbw +vtpfvc) %>% 
+  avg_predictions(by = c("static_dp", "vtpfvc"), 
+                  newdata = datagrid(static_dp = seq(5,35,1), 
+                                     vtpfvc = seq(5,25,1))) %>% as_tibble 
+
+sex_race_grid <-
+  expand_grid(
+    race = c("WHITE", "BLACK", "OTHER"),
+    sex = c("Male", "Female")
+  )
+
+
+stratified_vtpbw_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glmer(data = eicu.included,
+         family = binomial,
+         mortality ~ (1|hospitalid) + static_dp + age*sex*race +
+           sofa + safi + vtpbw) %>%  #tidy
+      avg_predictions(by = c("vtpbw", "static_dp" ),
+                      newdata = datagrid(
+                        static_dp = seq(5, 35,1),
+                        vtpbw = seq(6,8,0.1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+
+stratified_vtpbw_dp_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+      ~lmer(data = eicu.included,
+         static_dp ~ (1|hospitalid) + age*sex*race + scale(bmi) +
+         sofa + safi + vtpbw) %>%  #tidy
+         avg_predictions(by = c("vtpbw", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        vtpbw = seq(6,8,0.1),
+                        race = .x[1],
+                        sex = .x[2]
+                    )
+    ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+)
+
+stratified_vtpfvc_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glmer(data = eicu.included,
+         family = binomial,
+         mortality ~ (1|hospitalid) + static_dp + age*sex*race +
+           sofa + safi + vtpbw +vtpfvc) %>%  #tidy
+      avg_predictions(by = c("vtpfvc", "static_dp" ),
+                      newdata = datagrid(
+                        static_dp = seq(5, 35,1),
+                        vtpfvc = seq(6,24,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+
+stratified_vtpfvc_dp_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~lmer(data = eicu.included,
+        static_dp ~ (1|hospitalid) + age*sex*race + scale(bmi) +
+          sofa + safi + vtpfvc) %>%  #tidy
+      avg_predictions(by = c("vtpfvc", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        vtpfvc = seq(6,24,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+stratified_vtpfvc_age_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glmer(data = eicu.included,
+         family = binomial,
+         mortality ~ (1|hospitalid) +age*sex*race +
+           sofa + safi + vtpbw +vtpfvc) %>%  #tidy
+      avg_predictions(by = c("vtpfvc", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        vtpfvc = seq(6,24,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+stratified_dp_age_mortality_grid <- sex_race_grid %>% t %>%
+  as.data.frame() %>%
+  as.list %>%
+  map(
+    ~glmer(data = eicu.included,
+         family = binomial,
+         mortality ~ (1|hospitalid) + age*sex*race + static_dp +
+           sofa + safi + vtpbw) %>%  #tidy
+      avg_predictions(by = c("static_dp", "age"),
+                      newdata = datagrid(
+                        age = seq(20, 90,5),
+                        static_dp = seq(5, 35,1),
+                        race = .x[1],
+                        sex = .x[2]
+                      )
+      ) %>% as_tibble %>%
+      mutate(sex = .x[2] , race = .x[1])
+  )
+
+# 
+
+
+pdf("LRM - R1 - Figures/Figure I2 -eICU Stratified DP and mortality vs VTPFVC.pdf", height = 8, width= 12)
+stratified_vtpfvc_mortality_grid %>% rbindlist() %>%
+  ggplot(aes(vtpfvc, static_dp, fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "A", limits = c(0,1)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) +
+  labs(x = "VT/PFVC (%)", y = "Driving pressure (cm H2O)", fill = "Mortality")
+
+stratified_vtpfvc_dp_grid %>% rbindlist() %>%
+  ggplot(aes(vtpfvc, age, fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "G") + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) + 
+  labs(x = "VT/PFVC (%)", y="Age", fill = "Driving\npressure\n(cm H2O)")
+
+stratified_vtpfvc_age_mortality_grid %>% rbindlist() %>%
+  ggplot(aes(vtpfvc, age, fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "A", limits = c(0,1)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) +
+  labs(x = "VT/PFVC (%)", y = "Age (years)", fill = "Mortality")
+
+stratified_dp_age_mortality_grid %>% rbindlist() %>%
+  ggplot(aes(age, static_dp ,fill = estimate)) +
+  geom_tile() + 
+  scale_fill_viridis_c(option = "A", limits = c(0,1)) + 
+  scale_y_continuous(expand = c(0,0)) + 
+  scale_x_continuous(expand = c(0,0)) + 
+  theme_minimal() + 
+  theme(text = element_text(size = 16), 
+        axis.text = element_text(size = 16), 
+        aspect.ratio = 1, 
+        panel.grid = element_blank()) + 
+  facet_grid(sex ~ race) +
+  labs(x = "Age (years)", y = "Driving pressure (cm H2O)", fill = "Mortality")
+
+dev.off()
+
+t1 <- stratified_vtpfvc_mortality_grid %>% 
+  map(~.x %>% dplyr::select(vtpfvc, static_dp,mortality =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(vtpfvc %% 5 == 0, static_dp %% 5 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(mortality = paste(round(mortality, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(vtpfvc, static_dp), names_from = group,values_from = mortality) %>%
+  flextable
+ 
+
+t2 <- stratified_vtpfvc_age_mortality_grid%>% 
+  map(~.x %>% dplyr::select(vtpfvc, age,mortality =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(vtpfvc %% 5 == 0, age %% 20 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(mortality = paste(round(mortality, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(vtpfvc, age), names_from = group,values_from = mortality)%>%
+  flextable
+
+t3 <- stratified_vtpfvc_dp_grid%>% 
+  map(~.x %>% dplyr::select(vtpfvc, age,static_dp =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(vtpfvc %% 5 == 0, age %% 20 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(static_dp = paste(round(static_dp, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(vtpfvc, age), names_from = group,values_from = static_dp)%>%
+  flextable
+
+t4 <- stratified_dp_age_mortality_grid%>% 
+  map(~.x %>% dplyr::select(static_dp, age,mortality =  estimate, conf.low, conf.high, race, sex) %>%
+        filter(static_dp %% 5 == 0, age %% 10 == 0)) %>% 
+  data.table::rbindlist() %>%
+  mutate(mortality = paste(round(mortality, 2), " [", round(conf.low, 2), " - ", round(conf.high, 2), "]", sep =""), 
+         group = paste(race, sex)) %>%
+  pivot_wider(id_cols = c(static_dp, age), names_from = group,values_from = mortality) %>%
+  flextable
+
+# Create a new Word document with the table
+doc <- read_docx()
+doc <- body_add_flextable(doc, t1)
+doc <- body_add_flextable(doc, t2)
+doc <- body_add_flextable(doc, t3)
+doc <- body_add_flextable(doc, t4)
+
+# Save the document
+print(doc, target = "eICU - Marginal effects tables.docx")
+```
+
+
+
+# Regression coefficients for Table 2
+```{r}
+# Table with regression results for main manuscript
+table2_formulas <- list(
+  "Weight" = weight ~ pbw +  I(age/10) + sex + race,
+  "PFVC" = pfvc ~  pbw + I(age/10) + sex + race,  
+  "VT/PBW" = scale(vtpbw) ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa,
+  "VT/PFVC" = scale(vtpfvc) ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa,
+  "Static DP" = static_dp ~I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi,
+  "Static DP" = static_dp ~I(age/10) + sex + race + I(safi/10) + sofa + bmi,
+  "Compliance" = crs ~I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi,
+  "Ers - PBW" = scale(ers_vtpbw) ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi,
+  "Ers - PFVC" = scale(ers_vtpfvc) ~  I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi
+)
+
+table2_formulas <- list(
+  "Weight" = weight ~ pbw +  I(age/10) + sex + race,
+  "PFVC" = pfvc ~  pbw + I(age/10) + sex + race,  
+  "VT/PBW" = scale(vtpbw) ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa,
+  "VT/PFVC" = scale(vtpfvc) ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa,
+  "Static DP" = static_dp ~I(age/10) + sex + race+ I(height/10)  + I(safi/10) + sofa + bmi,
+  "Ers - PBW" = scale(ers_vtpbw) ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi,
+  "Ers - PFVC" = scale(ers_vtpfvc) ~  I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi
+)
+
+
+table2_leanweight <- table2_formulas[1:2] %>%
+  map(~lm(data = miiv.included %>%   filter(bmi < 25, bmi > 18.5), formula = .x)) 
+
+names(table2_leanweight) <- paste0(names(table2_leanweight), "-LeanWt")
+table2 <- table2_formulas %>%
+  map(~lm(data = miiv.included , formula = .x)) 
+
+table2_mort <- list("Mortality" = glm(mortality ~ I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa, 
+    data = miiv.included, family = binomial))
+
+table2_merged <- append(table2_leanweight, table2) %>% append(table2_mort)
+
+modelsummary(table2_merged, fmt = fmt_decimal(2) , stars = T, statistic = 'conf.int')
+
+modelsummary(table2_merged, fmt = fmt_decimal(2) , stars = T, statistic = 'conf.int',
+             output = "MIMIC- table2.xlsx")
+
+
+```
+
+# Tables for eICU
+```{r}
+# Table with regression results for main manuscript
+table2_formulas <- list(
+  "Weight" = weight ~ (1|hospitalid) + pbw +  I(age/10) + sex + race,
+  "PFVC" = pfvc ~  (1|hospitalid) + pbw + I(age/10) + sex + race,  
+  "VT/PBW" = scale(vtpbw) ~ (1|hospitalid) + I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa,
+  "VT/PFVC" = scale(vtpfvc) ~(1|hospitalid) +  I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa,
+  "Static DP" = static_dp ~(1|hospitalid) + I(age/10) + sex + race+ I(height/10)  + I(safi/10) + sofa + bmi,
+  "Ers - PBW" = scale(ers_vtpbw) ~ (1|hospitalid) + I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi,
+  "Ers - PFVC" = scale(ers_vtpfvc) ~ (1|hospitalid) +  I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa + bmi
+)
+
+table2_leanweight <- table2_formulas[1:2] %>%
+  map(~lmer(data = eicu.included %>%   filter(bmi < 25, bmi > 18.5), formula = .x)) 
+
+names(table2_leanweight) <- paste0(names(table2_leanweight), "-LeanWt")
+table2 <- table2_formulas %>%
+  map(~lmer(data = eicu.included , formula = .x)) 
+
+table2_mort <- list("Mortality" = glmer(mortality ~ (1|hospitalid) + I(age/10) + sex + race + I(height/10) + I(safi/10) + sofa, 
+    data = eicu.included, family = binomial))
+
+table2_merged <- append(table2_leanweight, table2) %>% append(table2_mort)
+
+ 
+modelsummary(table2_merged, fmt = fmt_decimal(2) , stars = T, statistic = 'conf.int')
+
+modelsummary(table2_merged, fmt = fmt_decimal(2) , stars = T, statistic = 'conf.int',
+             output = "eICU - TableK1 and K2.xlsx")
+
+range(eicu.included$vtpfvc)
+```
+
+
