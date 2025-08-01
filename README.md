@@ -50,16 +50,6 @@
 - `furrr` - Parallel processing
 - `officer`, `flextable` - Document generation
 
-## Data Sources
-
-This analysis uses data from:
-- **MIMIC-IV**: Medical Information Mart for Intensive Care IV database
-- **eICU**: eICU Collaborative Research Database
-
-Both databases are available from [PhysioNet](https://physionet.org/) and are subject to PhysioNet's data use agreements. Access requires:
-- Completion of the CITI "Data or Specimens Only Research" course
-- Signing the appropriate data use agreement
-- Approval from PhysioNet
 
 ## Running the Analysis
 
@@ -78,8 +68,13 @@ Both databases are available from [PhysioNet](https://physionet.org/) and are su
 - **Figures**: Saved as high-resolution images in the `figures/` directory
 - **Statistical Results**: Regression outputs and model summaries saved as RDS files
 
-## Data availability
-The MIMIC-IV and eICU databases are available through PhysioNet and subject to their data use agreements. 
+## Data Sources
+
+This analysis uses data from:
+- **MIMIC-IV**: Medical Information Mart for Intensive Care IV database
+- **eICU**: eICU Collaborative Research Database
+
+Both databases are available from [PhysioNet](https://physionet.org/) and are subject to PhysioNet's data use agreements.
 
 ## Reference 
 Sarma, et al. Evaluating the generalisability of formulas used to set tidal volumes in mechanically ventilated patients: an observational, multicohort, retrospective study. Lancet Respiratory Medicine 2025
