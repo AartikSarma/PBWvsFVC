@@ -8,13 +8,13 @@
 
 ### Core Analysis Files (Used for the preprint)
 
-**`1 - VTFVC - Simulated data.Rmd`** - Generates simulated patient data and calculates PBW-based and FVC-based tidal volumes across different demographics
-**`2 - VTFVC - RICU data import.Rmd`** - Imports and processes data from MIMIC-IV and eICU databases
-**`3 - VTFVC - Incusion criteria.Rmd`** - Applies inclusion/exclusion criteria to create the final analytical cohort
-**`4 - VTFVC - Table 1.Rmd`** - Creates baseline characteristics table (Table 1) for the study population
-**`5 - VTFVC - Regression and sensitivity analyses.R`** - Performs primary regression analyses and sensitivity analyses
-**`6 - VTFVC - Regression Tables.Rmd`** - Formats regression results into publication-ready tables
-**`7- VTFVC - Survival curves.R`** - Generates survival curves and related analyses
+- **`1 - VTFVC - Simulated data.Rmd`** - Generates simulated patient data and calculates PBW-based and FVC-based tidal volumes across different demographics
+- **`2 - VTFVC - RICU data import.Rmd`** - Imports and processes data from MIMIC-IV and eICU databases
+- **`3 - VTFVC - Incusion criteria.Rmd`** - Applies inclusion/exclusion criteria to create the final analytical cohort
+- **`4 - VTFVC - Table 1.Rmd`** - Creates baseline characteristics table (Table 1) for the study population
+- **`5 - VTFVC - Regression and sensitivity analyses.R`** - Performs primary regression analyses and sensitivity analyses
+- **`6 - VTFVC - Regression Tables.Rmd`** - Formats regression results into publication-ready tables
+- **`7- VTFVC - Survival curves.R`** - Generates survival curves and related analyses
 
 ### Additional Analyses (For the published paper)
 
