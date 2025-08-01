@@ -6,7 +6,7 @@
 
 ## Repository Structure
 
-### Core Analysis Files (Used for the preprint)
+### Preprint Analysis Files 
 
 - **`1 - VTFVC - Simulated data.Rmd`** - Generates simulated patient data and calculates PBW-based and FVC-based tidal volumes across different demographics
 - **`2 - VTFVC - RICU data import.Rmd`** - Imports and processes data from MIMIC-IV and eICU databases
@@ -16,7 +16,7 @@
 - **`6 - VTFVC - Regression Tables.Rmd`** - Formats regression results into publication-ready tables
 - **`7 - VTFVC - Survival curves.R`** - Generates survival curves and related analyses
 
-### Additional Analyses (For the published paper)
+### Final Manuscript Analysis
 
 - **`PBW vs FVC analyses and figures.qmd`** - This file includes generates figures and analysis used in the final manuscript. Notable changes from the original preprint include a direct comparison of PBW and predicted FVC (rather than VT/PBW and VT/FVC) and additional investigation of driving pressure and normalized elastance.
 
