@@ -1,5 +1,7 @@
 # PBW vs FVC - Predicted Body Weight versus Forced Vital Capacity in Mechanical Ventilation
 
+This study compared two methods of estimating lung volumes for mechanical ventilation settings: predicted body weight (PBW), currently used in clinical practice, versus predicted forced vital capacity (PFVC) calculated using spirometric reference equations. We found that PBW systematically overestimates lung volumes in older, shorter, female, and non-White patients compared to younger, taller, male, and White patients, which leads to these groups receiving relatively higher tidal volumes during mechanical ventilation. This algorithmic bias was associated with increased mortality risk, suggesting that more personalized approaches to adjusting ventilators could lead to better outcomes in the ICU. 
+
 **Initial Preprint**: [SSRN](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4898478)
 
 **Published Paper**: [The Lancet Respiratory Medicine](https://www.thelancet.com/journals/lanres/article/PIIS2213-2600(25)00126-2/abstract)
@@ -77,4 +79,4 @@ This analysis uses data from:
 Both databases are available from [PhysioNet](https://physionet.org/) and are subject to PhysioNet's data use agreements.
 
 ## Reference 
-Sarma, et al. Evaluating the generalisability of formulas used to set tidal volumes in mechanically ventilated patients: an observational, multicohort, retrospective study. Lancet Respiratory Medicine 2025
+Sarma, et al. Evaluating the generalisability of formulas used to set tidal volumes in mechanically ventilated patients: an observational, multicohort, retrospective study. _Lancet Respiratory Medicine_ 2025
